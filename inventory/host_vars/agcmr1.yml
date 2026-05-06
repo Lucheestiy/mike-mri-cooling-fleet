@@ -1,0 +1,48 @@
+mri_user: agcmr1
+mri_modules:
+  - temp_sensors
+  - camera_edge
+
+temp_sensors:
+  project_dir: /home/agcmr1/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: AGCMR1
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  probe_in_id: 28-000000543327
+  probe_out_id: 28-000000beb6c5
+  probe_primary_in_id: 28-000000534fb4
+  probe_primary_out_id: 28-0000005410e0
+  probe_room_id: 28-00000055810d
+  sensor_offsets:
+    "28-0000005410e0": -0.08
+    "28-000000beb6c5": 0.07
+    "28-00000055810d": 0.0
+    "28-000000534fb4": -0.05
+    "28-000000543327": 0.06
+
+camera_edge:
+  base_dir: /home/agcmr1/mri-cooling-camera
+  site_id: AGCMR1
+  camera_backend_url: https://cam.coolmri.com/api/camera/pressure
+  calibration_url: https://cam.coolmri.com/api/camera/images
+  capture_interval: 60
+  image_width: 1920
+  image_height: 1080
+  upload_enabled: true
+  upload_mode: full_and_crop
+  ocr_crop_coords:
+    x: 708
+    y: 520
+    w: 364
+    h: 182
+  debug_save_images: true
+  calibration_mode: false
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5

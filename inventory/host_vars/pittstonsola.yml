@@ -1,0 +1,53 @@
+mri_user: pts
+mri_hostname: pittston-sola
+
+mri_modules:
+  - temp_sensors
+  - camera_edge
+
+temp_sensors:
+  project_dir: /home/pts/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: PittstonSola
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  # Swapped live on 2026-04-16 per site request:
+  # - former primary cooling probes now map to helium
+  # - former helium probes now map to primary cooling
+  probe_in_id: 28-0000007ad28a
+  probe_out_id: 28-000000b4d89c
+  probe_primary_in_id: 28-000000b246df
+  probe_primary_out_id: 28-000000b2398c
+  probe_room_id: 28-000000b9584e
+  sensor_offsets:
+    "28-0000007ad28a": -0.23
+    "28-000000b2398c": 0.15
+    "28-000000b246df": -0.12
+    "28-000000b4d89c": 0.18
+    "28-000000b9584e": 0.01
+
+camera_edge:
+  base_dir: /home/pts/mri-cooling-camera
+  site_id: PittstonSola
+  camera_backend_url: https://cam.coolmri.com/api/camera/pressure
+  calibration_url: https://cam.coolmri.com/api/camera/images
+  capture_interval: 60
+  image_width: 1920
+  image_height: 1080
+  upload_enabled: true
+  upload_mode: full_and_crop
+  ocr_crop_coords:
+    x: 708
+    y: 520
+    w: 364
+    h: 182
+  debug_save_images: true
+  calibration_mode: false
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5

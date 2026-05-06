@@ -1,0 +1,58 @@
+mri_user: gcmc
+mri_hostname: gcmc-sola
+
+mri_modules:
+  - temp_sensors
+  - camera_edge
+
+temp_sensors:
+  project_dir: /home/gcmc/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: GCMCSola
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  enable_service: true
+  start_service: true
+  # Bench-staged 2026-04-07. Updated 2026-04-07 per latest user-confirmed pipe mapping.
+  probe_in_id: 28-0000006e00ee
+  probe_out_id: 28-0000006d701b
+  probe_primary_in_id: 28-0000006d915f
+  probe_primary_out_id: 28-0000006ff713
+  probe_room_id: 28-0000007013ee
+  # Bench calibration performed 2026-04-07 with all probes bundled together.
+  sensor_offsets:
+    "28-0000006d701b": 0.2878
+    "28-0000006d915f": -0.1502
+    "28-0000006e00ee": -0.1502
+    "28-0000006ff713": -0.0252
+    "28-0000007013ee": 0.0378
+
+camera_edge:
+  base_dir: /home/gcmc/mri-cooling-camera
+  site_id: GCMCSola
+  camera_backend_url: https://cam.coolmri.com/api/camera/pressure
+  calibration_url: https://cam.coolmri.com/api/camera/images
+  capture_interval: 60
+  image_width: 1920
+  image_height: 1080
+  upload_enabled: true
+  upload_mode: full_and_crop
+  ocr_crop_coords:
+    x: 708
+    y: 520
+    w: 364
+    h: 182
+  shutter_speed: 1500
+  gain: 2.5
+  captures_per_session: 10
+  debug_save_images: false
+  calibration_mode: false
+  install_cron: true
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5

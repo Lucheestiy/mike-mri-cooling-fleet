@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="mri-sensor.service"
+SYSTEMCTL="/usr/bin/systemctl"
+JOURNALCTL="/usr/bin/journalctl"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: mri-sensor-service {status|is-active|start|stop|restart|logs [--since <when>] [--lines <count>]}
+EOF
+  exit 2
+}
+
+require_binary() {
+  local path="$1"
+  if [[ ! -x "${path}" ]]; then
+    echo "Required binary not found: ${path}" >&2
+    exit 1
+  fi
+}
+
+run_logs() {
+  local since="" lines="100"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since)
+        [[ $# -ge 2 ]] || usage
+        since="$2"
+        shift 2
+        ;;
+      --lines)
+        [[ $# -ge 2 ]] || usage
+        lines="$2"
+        shift 2
+        ;;
+      *)
+        usage
+        ;;
+    esac
+  done
+
+  local cmd=("${JOURNALCTL}" "-u" "${SERVICE_NAME}" "--no-pager" "-n" "${lines}")
+  if [[ -n "${since}" ]]; then
+    cmd+=("--since" "${since}")
+  fi
+  exec "${cmd[@]}"
+}
+
+main() {
+  [[ $# -ge 1 ]] || usage
+
+  require_binary "${SYSTEMCTL}"
+  require_binary "${JOURNALCTL}"
+
+  case "$1" in
+    status)
+      exec "${SYSTEMCTL}" status "${SERVICE_NAME}" --no-pager
+      ;;
+    is-active)
+      exec "${SYSTEMCTL}" is-active "${SERVICE_NAME}"
+      ;;
+    start)
+      exec "${SYSTEMCTL}" start "${SERVICE_NAME}"
+      ;;
+    stop)
+      exec "${SYSTEMCTL}" stop "${SERVICE_NAME}"
+      ;;
+    restart)
+      exec "${SYSTEMCTL}" restart "${SERVICE_NAME}"
+      ;;
+    logs)
+      shift
+      run_logs "$@"
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
+main "$@"

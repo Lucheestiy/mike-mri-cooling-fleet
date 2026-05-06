@@ -1,0 +1,16 @@
+[Unit]
+Description=MRI Cooling Monitor Sensor Service
+After=network.target w1-gpio.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart={{ temp_sensors_project_dir }}/venv/bin/python3 {{ temp_sensors_project_dir }}/src/pi_sensor.py
+WorkingDirectory={{ temp_sensors_project_dir }}
+Restart=always
+RestartSec=15
+User={{ mri_user }}
+Group={{ mri_user }}
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

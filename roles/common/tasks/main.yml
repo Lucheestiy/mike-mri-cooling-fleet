@@ -1,0 +1,83 @@
+- name: Ensure base packages installed
+  ansible.builtin.apt:
+    name:
+      - python3
+      - python3-venv
+      - python3-pip
+      - git
+      - cron
+      - rsync
+    update_cache: true
+
+- name: Ensure cron service running
+  ansible.builtin.service:
+    name: cron
+    state: started
+    enabled: true
+
+- name: Set hostname when requested
+  ansible.builtin.hostname:
+    name: "{{ mri_hostname }}"
+  when:
+    - mri_hostname is defined
+    - (mri_hostname | length) > 0
+
+- name: Ensure /etc/hosts has hostname entry when requested
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\\.0\\.1\\.1\\s+'
+    line: "127.0.1.1 {{ mri_hostname }}"
+    state: present
+  when:
+    - mri_hostname is defined
+    - (mri_hostname | length) > 0
+
+- name: Install restricted Pi backup helper
+  ansible.builtin.copy:
+    src: mri-backup-disk
+    dest: "{{ pi_backup.helper_path | default('/usr/local/sbin/mri-backup-disk') }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - pi_backup.enable_restricted_disk_backup | default(true)
+    - mri_user is defined
+    - (mri_user | length) > 0
+
+- name: Install restricted MRI sensor service helper
+  ansible.builtin.copy:
+    src: mri-sensor-service
+    dest: "{{ mri_sensor_service.helper_path | default('/usr/local/sbin/mri-sensor-service') }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - mri_sensor_service.enable_restricted_service_helper | default(true)
+    - mri_user is defined
+    - (mri_user | length) > 0
+
+- name: Install restricted sudoers entry for Pi disk backup helper
+  ansible.builtin.template:
+    src: mri-backup-disk.sudoers.j2
+    dest: "{{ pi_backup.sudoers_path | default('/etc/sudoers.d/mri-backup-disk') }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when:
+    - pi_backup.enable_restricted_disk_backup | default(true)
+    - mri_user is defined
+    - (mri_user | length) > 0
+
+- name: Install restricted sudoers entry for MRI sensor service helper
+  ansible.builtin.template:
+    src: mri-sensor-service.sudoers.j2
+    dest: "{{ mri_sensor_service.sudoers_path | default('/etc/sudoers.d/mri-sensor-service') }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when:
+    - mri_sensor_service.enable_restricted_service_helper | default(true)
+    - mri_user is defined
+    - (mri_user | length) > 0

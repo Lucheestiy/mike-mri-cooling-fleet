@@ -1,0 +1,44 @@
+mri_user: vwm2
+mri_hostname: vwm2-aera
+
+mri_modules:
+  - temp_sensors
+
+temp_sensors:
+  project_dir: /home/vwm2/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: VWM2
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  enable_service: true
+  start_service: true
+  # Bench-staged 2026-04-10 after replacing the bundled probes.
+  # The five detected probes are bundled on the bench and reading near-identically,
+  # so this is a provisional sorted-ID mapping to get the service online.
+  # Remap after the physical probe identities are confirmed on install.
+  # Detected IDs:
+  # - 28-000000508261
+  # - 28-00000050fb5b
+  # - 28-000000518522
+  # - 28-000000beca89
+  # - 28-000000bf3325
+  # User-confirmed remap applied 2026-04-10.
+  probe_in_id: 28-000000518522
+  probe_out_id: 28-000000bf3325
+  probe_primary_in_id: 28-000000508261
+  probe_primary_out_id: 28-00000050fb5b
+  probe_room_id: 28-000000beca89
+  # Bundled-probe calibration captured 2026-04-10 from 2 direct 1-wire samples per probe.
+  # Target mean across the five detected probes: 22.4809 C
+  sensor_offsets:
+    "28-000000508261": 0.1374
+    "28-00000050fb5b": -0.0811
+    "28-000000518522": -0.0811
+    "28-000000beca89": 0.1689
+    "28-000000bf3325": -0.1441

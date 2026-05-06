@@ -1,0 +1,98 @@
+- name: Fail if mri_user missing
+  ansible.builtin.assert:
+    that:
+      - mri_user is defined
+      - (mri_user | length) > 0
+    fail_msg: "Set `mri_user` in inventory/host_vars/<host>.yml"
+
+- name: Set temp sensor paths
+  ansible.builtin.set_fact:
+    temp_sensors_project_dir: "{{ temp_sensors.project_dir | default('/opt/mri/pi-sensor') }}"
+    temp_sensors_src_dir: "{{ (temp_sensors.project_dir | default('/opt/mri/pi-sensor')) ~ '/src' }}"
+
+- name: Ensure temp sensor directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0755"
+  loop:
+    - "{{ temp_sensors_project_dir }}"
+    - "{{ temp_sensors_src_dir }}"
+    - "{{ temp_sensors_project_dir }}/logs"
+
+- name: Install pi_sensor.py
+  ansible.builtin.copy:
+    src: pi_sensor.py
+    dest: "{{ temp_sensors_src_dir }}/pi_sensor.py"
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0755"
+
+- name: Install requirements_pi.txt
+  ansible.builtin.copy:
+    src: requirements_pi.txt
+    dest: "{{ temp_sensors_src_dir }}/requirements_pi.txt"
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0644"
+
+- name: Install .env for temp sensors
+  ansible.builtin.template:
+    src: pi_sensor.env.j2
+    dest: "{{ temp_sensors_project_dir }}/.env"
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0644"
+
+- name: Install sensor_offsets.json
+  ansible.builtin.template:
+    src: sensor_offsets.json.j2
+    dest: "{{ temp_sensors_src_dir }}/sensor_offsets.json"
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0644"
+
+- name: Ensure 1-wire overlay enabled
+  ansible.builtin.lineinfile:
+    path: /boot/firmware/config.txt
+    line: dtoverlay=w1-gpio
+    state: present
+  register: one_wire_overlay
+  when: temp_sensors.one_wire_gpio | default(true)
+
+- name: Reboot after enabling 1-wire overlay
+  ansible.builtin.reboot:
+    msg: "Rebooting to enable w1-gpio overlay"
+    reboot_timeout: 300
+  when:
+    - temp_sensors.one_wire_gpio | default(true)
+    - one_wire_overlay is changed
+
+- name: Create venv for temp sensors
+  ansible.builtin.command: "python3 -m venv {{ temp_sensors_project_dir }}/venv"
+  args:
+    creates: "{{ temp_sensors_project_dir }}/venv/bin/python3"
+  become_user: "{{ mri_user }}"
+
+- name: Install temp sensor python deps
+  ansible.builtin.command: "{{ temp_sensors_project_dir }}/venv/bin/pip install -r {{ temp_sensors_src_dir }}/requirements_pi.txt"
+  changed_when: false
+  become_user: "{{ mri_user }}"
+
+- name: Install systemd service for temp sensors
+  ansible.builtin.template:
+    src: mri-sensor.service.j2
+    dest: "/etc/systemd/system/{{ temp_sensors.service_name | default('mri-sensor') }}.service"
+    mode: "0644"
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Enable and restart temp sensor service
+  ansible.builtin.systemd:
+    name: "{{ temp_sensors.service_name | default('mri-sensor') }}.service"
+    enabled: "{{ temp_sensors.enable_service | default(true) }}"
+    state: "{{ 'restarted' if (temp_sensors.start_service | default(true)) else 'stopped' }}"

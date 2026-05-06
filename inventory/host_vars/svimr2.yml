@@ -1,0 +1,56 @@
+mri_user: svimr2
+mri_hostname: svimr2-vida
+
+mri_modules:
+  - temp_sensors
+  - camera_edge
+
+temp_sensors:
+  project_dir: /home/svimr2/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: SVIMR2
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  invalid_sensor_restart_threshold: 3
+  sensor_discovery_timeout_sec: 120
+  sensor_discovery_interval_sec: 5
+  sensor_rescan_timeout_sec: 30
+  sensor_rescan_interval_sec: 5
+  probe_in_id: 28-0000005376c4
+  probe_out_id: 28-000000537857
+  probe_primary_in_id: 28-000000556aff
+  probe_primary_out_id: 28-00000051b05f
+  probe_room_id: 28-000000535859
+  sensor_offsets:
+    "28-000000535859": -0.05
+    "28-00000051b05f": 0.01
+    "28-000000537857": 0.07
+    "28-000000556aff": 0.02
+    "28-0000005376c4": -0.05
+
+camera_edge:
+  base_dir: /home/svimr2/mri-cooling-camera
+  site_id: SVIMR2
+  camera_backend_url: https://cam.coolmri.com/api/camera/pressure
+  calibration_url: https://cam.coolmri.com/api/camera/images
+  capture_interval: 60
+  image_width: 1920
+  image_height: 1080
+  upload_enabled: true
+  upload_mode: full_and_crop
+  ocr_crop_coords:
+    x: 708
+    y: 520
+    w: 364
+    h: 182
+  debug_save_images: false
+  calibration_mode: false
+  install_cron: true
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5

@@ -1,0 +1,45 @@
+# Defaults that apply to most Pis. Override per-host in inventory/host_vars/<host>.yml
+
+mri_modules: []
+
+temp_sensors:
+  project_dir: /opt/mri/pi-sensor
+  service_name: mri-sensor
+  log_path: logs/pi_sensor.log
+  avg_window: 5
+  poll_sec: 10
+  invalid_sensor_restart_threshold: 3
+  sensor_discovery_timeout_sec: 90
+  sensor_discovery_interval_sec: 5
+  sensor_rescan_timeout_sec: 20
+  sensor_rescan_interval_sec: 5
+  one_wire_gpio: true
+  enable_service: true
+  start_service: true
+  memory_only_mode: false
+  wear_leveling: true
+  ram_log_capacity: 1000
+  disk_sync_interval: 3600
+  enable_dual_streaming: false
+
+camera_edge:
+  capture_interval: 60
+  image_width: 1920
+  image_height: 1080
+  upload_enabled: true
+  upload_mode: full_and_crop
+  debug_save_images: true
+  calibration_mode: false
+  install_cron: true
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5
+
+pi_backup:
+  enable_restricted_disk_backup: true
+  helper_path: /usr/local/sbin/mri-backup-disk
+  sudoers_path: /etc/sudoers.d/mri-backup-disk
+
+mri_sensor_service:
+  enable_restricted_service_helper: true
+  helper_path: /usr/local/sbin/mri-sensor-service
+  sudoers_path: /etc/sudoers.d/mri-sensor-service

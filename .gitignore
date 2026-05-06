@@ -1,0 +1,13 @@
+# Local secrets / state
+**/.env
+**/.env.*
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.log
+**/*.tmp
+
+# Snapshots are for inspection only
+snapshots/
+reports/

@@ -1,0 +1,61 @@
+mri_user: gswb
+mri_hostname: gswb-sola
+
+mri_modules:
+  - temp_sensors
+  - camera_edge
+
+temp_sensors:
+  project_dir: /home/gswb/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: GSWBSola
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  enable_service: true
+  start_service: true
+  # Live mapping updated on 2026-04-07 after user-confirmed physical label remap.
+  # Detected IDs:
+  # - 28-000000b1fbab
+  # - 28-000000b22150
+  # - 28-000000b32dbb
+  # - 28-000000b947e7
+  # - 28-000000b9616f
+  probe_in_id: 28-000000b32dbb
+  probe_out_id: 28-000000b9616f
+  probe_primary_in_id: 28-000000b1fbab
+  probe_primary_out_id: 28-000000b22150
+  probe_room_id: 28-000000b947e7
+  # Bundled-probe calibration refreshed 2026-04-07 after user-confirmed remap.
+  sensor_offsets:
+    "28-000000b1fbab": 0.1069
+    "28-000000b22150": -0.0233
+    "28-000000b32dbb": 0.1642
+    "28-000000b947e7": -0.0796
+    "28-000000b9616f": -0.1681
+
+camera_edge:
+  base_dir: /home/gswb/mri-cooling-camera
+  site_id: GSWBSola
+  camera_backend_url: https://cam.coolmri.com/api/camera/pressure
+  calibration_url: https://cam.coolmri.com/api/camera/images
+  capture_interval: 60
+  image_width: 1920
+  image_height: 1080
+  upload_enabled: true
+  upload_mode: full_and_crop
+  ocr_crop_coords:
+    x: 708
+    y: 520
+    w: 364
+    h: 182
+  debug_save_images: false
+  calibration_mode: false
+  install_cron: true
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5

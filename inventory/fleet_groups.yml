@@ -1,0 +1,58 @@
+groups:
+  agc:
+    description: AGC MRI rooms
+    members:
+      - agcmr1
+      - agcmr2
+      - agcmr3
+  woodbine:
+    description: Woodbine MRI sites
+    members:
+      - oswmr1
+      - oswmr2
+  svi:
+    description: Susquehanna Valley Imaging
+    members:
+      - svimr1
+      - svimr2
+  gmc:
+    description: Geisinger Medical Center MRI hosts
+    members:
+      - agcmr2
+  gcmc-sites:
+    description: Geisinger Commonwealth School of Medicine hosts
+    members:
+      - gcmcsola
+      - gcmcmr2
+  geisinger:
+    description: Combined Geisinger hospital and imaging hosts
+    members:
+      - agc
+      - gmc
+      - gcmc-sites
+      - gbh
+      - shmr
+      - jsmr
+  pittston:
+    description: Pittston bench and live systems
+    members:
+      - pittstonsola
+      - pittstonvida
+  greyswoods:
+    description: Greyswoods systems
+    members:
+      - gr
+  penn-highlands:
+    description: Penn Highlands sites
+    members:
+      - phc
+      - phmv
+  vwm:
+    description: VWM systems
+    members:
+      - vwm1
+      - vwm2
+      - vwm3
+  cameras:
+    description: Dedicated camera/OCR Pi hosts
+    members:

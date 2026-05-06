@@ -1,0 +1,62 @@
+mri_user: gcmc2
+mri_hostname: gcmc2-sola
+
+mri_modules:
+  - temp_sensors
+  - camera_edge
+
+temp_sensors:
+  project_dir: /home/gcmc2/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: GCMCMR2
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  enable_service: true
+  start_service: true
+  # Bench-staged 2026-04-13. The five probes are currently bundled on the bench
+  # and reading near-identically, so this is a provisional sorted-ID mapping.
+  # Remap after the physical probe identities are confirmed on install.
+  # Detected IDs:
+  # - 28-0000006caeba
+  # - 28-0000006cb97f
+  # - 28-0000006d925e
+  # - 28-0000006de43d
+  # - 28-0000006e07f6
+  probe_in_id: 28-0000006caeba
+  probe_out_id: 28-0000006de43d
+  probe_primary_in_id: 28-0000006d925e
+  probe_primary_out_id: 28-0000006cb97f
+  probe_room_id: 28-0000006e07f6
+  sensor_offsets:
+    "28-0000006caeba": -0.0498
+    "28-0000006cb97f": -0.2252
+    "28-0000006d925e": 0.0626
+    "28-0000006de43d": 0.2002
+    "28-0000006e07f6": 0.0122
+
+camera_edge:
+  base_dir: /home/gcmc2/mri-cooling-camera
+  site_id: GCMCMR2
+  camera_backend_url: https://cam.coolmri.com/api/camera/pressure
+  calibration_url: https://cam.coolmri.com/api/camera/images
+  capture_interval: 60
+  image_width: 1920
+  image_height: 1080
+  upload_enabled: true
+  upload_mode: full_and_crop
+  ocr_crop_coords:
+    x: 708
+    y: 520
+    w: 364
+    h: 182
+  debug_save_images: false
+  calibration_mode: false
+  install_cron: true
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5

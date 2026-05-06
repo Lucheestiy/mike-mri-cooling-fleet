@@ -1,0 +1,151 @@
+all:
+  children:
+    fleet_ops:
+      hosts:
+        agcmr1:
+          ansible_host: 100.110.245.105
+          ansible_user: agcmr1
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: AGC MR1
+          mri_site: Geisinger Medical Center MRI #1 Sola
+        agcmr2:
+          ansible_host: 100.94.132.85
+          ansible_user: mrcu
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: AGC MR2
+          mri_site: Geisinger Medical Center MRI #2 Sola
+        agcmr3:
+          ansible_host: 100.103.6.98
+          ansible_user: agcmr3
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: AGC MR3
+          mri_site: Geisinger Medical Center MRI #3 Vida
+        oswmr1:
+          ansible_host: 100.70.137.73
+          ansible_user: oswmr1
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: OSW MR1
+          mri_site: Woodbine MRI #1 Sola
+        oswmr2:
+          ansible_host: 100.66.66.116
+          ansible_user: oswmr2
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: OSW MR2
+          mri_site: Woodbine MRI #2 Vida
+          mri_alt_users:
+            - root
+          mri_notes: Secondary root login also works; pubkey auth repaired on 2026-04-13.
+        svimr1:
+          ansible_host: 100.101.120.123
+          ansible_user: svimr1
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: SVI MR1
+          mri_site: Susquehanna Valley Imaging MRI #1 Aera
+        svimr2:
+          ansible_host: 100.117.38.77
+          ansible_user: svimr2
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: SVI MR2
+          mri_site: Susquehanna Valley Imaging MRI #2 Vida
+        gbh:
+          ansible_host: 100.78.186.97
+          ansible_user: gbh
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GBH MR
+          mri_site: Geisinger Bloomsburg Hospital MRI Aera
+        shmr:
+          ansible_host: 100.105.207.116
+          ansible_user: shmr
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: Shamokin MR
+          mri_site: Geisinger Shamokin Hospital MR Aera
+        muncymr:
+          ansible_host: 100.102.108.1
+          ansible_user: muncymr
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: Muncy MR
+          mri_site: Muncy Hospital MRI Sola
+        jsmr:
+          ansible_host: 100.70.4.30
+          ansible_user: jsmr
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: Jersey Shore MR
+          mri_site: Geisinger Jersey Shore Hospital MRI Sola
+        phc:
+          ansible_host: 100.110.254.62
+          ansible_user: phc
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: PHC
+          mri_site: Penn Highlands Connellsville
+        phmv:
+          ansible_host: 100.90.155.76
+          ansible_user: phmv
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: PHMV
+          mri_site: Penn Highlands Monongahela Valley
+        gr:
+          ansible_host: 100.126.83.91
+          ansible_user: gr
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GR
+          mri_site: Greyswoods Aera
+        pittstonsola:
+          ansible_host: 100.86.162.63
+          ansible_user: pts
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: Pittston Sola
+          mri_site: Pittston Sola
+        pittstonvida:
+          ansible_host: 100.75.151.96
+          ansible_user: ptv
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: Pittston Vida
+          mri_site: Pittston Vida
+        gcmcsola:
+          ansible_host: 100.106.107.124
+          ansible_user: gcmc
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GCMC
+          mri_site: Geisinger Commonwealth School of Medicine Sola
+        gcmcmr2:
+          ansible_host: 100.67.249.11
+          ansible_user: gcmc2
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GCMC MR2
+          mri_site: GCMC MR2 Sola
+        gswbsola:
+          ansible_host: 100.99.117.107
+          ansible_user: gswb
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GSWB
+          mri_site: GSWB Sola
+        gwvskyra:
+          ansible_host: 100.113.100.18
+          ansible_user: gwv
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GWV
+          mri_site: GWV Skyra
+        vwm1:
+          ansible_host: 100.93.88.121
+          ansible_user: vwm1
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: VWM1
+          mri_site: VWM1
+        vwm2:
+          ansible_host: 100.126.97.119
+          ansible_user: vwm2
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: VWM2
+          mri_site: VWM2
+        vwm3:
+          ansible_host: 100.88.55.37
+          ansible_user: vwm3
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: VWM3
+          mri_site: VWM3
+        glh:
+          ansible_host: 100.120.102.8
+          ansible_user: glh
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GLH
+          mri_site: Lewistown Hospital

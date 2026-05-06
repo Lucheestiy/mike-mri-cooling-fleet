@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 {info|image}" >&2
+  exit 2
+}
+
+resolve_root_disk() {
+  local root_src resolved pkname
+  root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+  if [[ -z "${root_src}" ]]; then
+    echo "Could not determine root filesystem source" >&2
+    exit 1
+  fi
+
+  resolved="$(readlink -f "${root_src}" 2>/dev/null || printf '%s' "${root_src}")"
+  pkname="$(lsblk -ndo PKNAME "${resolved}" 2>/dev/null | head -n1 || true)"
+
+  if [[ -n "${pkname}" ]]; then
+    printf '/dev/%s\n' "${pkname}"
+    return
+  fi
+
+  if [[ "${resolved}" == /dev/* && -b "${resolved}" ]]; then
+    printf '%s\n' "${resolved}"
+    return
+  fi
+
+  echo "Could not resolve backing disk for ${root_src}" >&2
+  exit 1
+}
+
+main() {
+  [[ $# -eq 1 ]] || usage
+
+  local action device size root_src
+  action="$1"
+  device="$(resolve_root_disk)"
+  root_src="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+  size="$(blockdev --getsize64 "${device}" 2>/dev/null || true)"
+
+  case "${action}" in
+    info)
+      printf 'device=%s\n' "${device}"
+      printf 'root_source=%s\n' "${root_src}"
+      printf 'size_bytes=%s\n' "${size}"
+      ;;
+    image)
+      exec dd if="${device}" bs=8M iflag=fullblock status=none
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
+main "$@"

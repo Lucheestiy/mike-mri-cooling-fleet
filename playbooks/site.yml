@@ -1,0 +1,9 @@
+- name: Configure MRI Cooling Pi fleet
+  hosts: pis
+  become: true
+  roles:
+    - role: common
+    - role: temp_sensors
+      when: "'temp_sensors' in (mri_modules | default([]))"
+    - role: camera_edge
+      when: "'camera_edge' in (mri_modules | default([]))"

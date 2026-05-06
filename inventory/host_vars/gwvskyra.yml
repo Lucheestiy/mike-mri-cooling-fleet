@@ -1,0 +1,42 @@
+mri_user: gwv
+mri_hostname: gwv-skyra
+
+mri_modules:
+  - temp_sensors
+
+temp_sensors:
+  project_dir: /home/gwv/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: GWVSkyra
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  enable_service: true
+  start_service: true
+  # Bench-staged 2026-04-09. These five probes are currently bundled and reading near-identically,
+  # so this is a provisional sorted-ID mapping to get the service online.
+  # Remap after the physical probe identities are confirmed on install.
+  # Detected IDs:
+  # - 28-0000006cb59c
+  # - 28-0000006e653d
+  # - 28-0000006fff8a
+  # - 28-00000070f720
+  # - 28-000000711c5a
+  probe_in_id: 28-0000006cb59c
+  probe_out_id: 28-0000006fff8a
+  probe_primary_in_id: 28-0000006e653d
+  probe_primary_out_id: 28-00000070f720
+  probe_room_id: 28-000000711c5a
+  # Bundled-probe calibration captured 2026-04-09 from 12 direct 1-wire samples.
+  # Target mean: 22.8112 C
+  sensor_offsets:
+    "28-0000006cb59c": 0.0044
+    "28-0000006e653d": 0.1862
+    "28-0000006fff8a": 0.1552
+    "28-00000070f720": -0.2043
+    "28-000000711c5a": -0.1415

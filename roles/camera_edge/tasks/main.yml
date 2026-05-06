@@ -1,0 +1,137 @@
+- name: Fail if mri_user missing
+  ansible.builtin.assert:
+    that:
+      - mri_user is defined
+      - (mri_user | length) > 0
+    fail_msg: "Set `mri_user` in inventory/host_vars/<host>.yml"
+
+- name: Set camera edge paths
+  ansible.builtin.set_fact:
+    camera_edge_base_dir: "{{ camera_edge.base_dir | default('/home/' ~ mri_user ~ '/mri-cooling-camera', true) }}"
+    camera_edge_edge_dir: "{{ (camera_edge.base_dir | default('/home/' ~ mri_user ~ '/mri-cooling-camera', true)) ~ '/edge' }}"
+
+- name: Ensure camera user has required groups
+  ansible.builtin.user:
+    name: "{{ mri_user }}"
+    groups:
+      - video
+      - render
+    append: true
+
+- name: Ensure camera system packages installed
+  ansible.builtin.apt:
+    name:
+      - rpicam-apps
+      - libcamera-tools
+      - v4l-utils
+      - tesseract-ocr
+      - ssocr
+      - git
+      - cron
+      - python3-venv
+      - python3-pip
+      - python3-libcamera
+      - python3-picamera2
+      - python3-opencv
+      - python3-numpy
+      - python3-pil
+    update_cache: true
+
+- name: Ensure camera directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0755"
+  loop:
+    - "{{ camera_edge_base_dir }}"
+    - "{{ camera_edge_edge_dir }}"
+    - "{{ camera_edge_edge_dir }}/images"
+    - "{{ camera_edge_edge_dir }}/failed_sessions"
+    - "{{ camera_edge_edge_dir }}/debug_7seg"
+    - "{{ camera_edge_edge_dir }}/logs"
+
+- name: Create camera venv
+  ansible.builtin.command: "python3 -m venv --system-site-packages {{ camera_edge_base_dir }}/venv"
+  args:
+    creates: "{{ camera_edge_base_dir }}/venv/bin/python3"
+  become_user: "{{ mri_user }}"
+
+- name: Install camera python deps
+  ansible.builtin.command: "{{ camera_edge_base_dir }}/venv/bin/pip install -U pip pytesseract python-dotenv requests schedule"
+  changed_when: false
+  become_user: "{{ mri_user }}"
+
+- name: Install camera edge scripts (from role files)
+  ansible.builtin.copy:
+    src: edge/
+    dest: "{{ camera_edge_edge_dir }}/"
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0644"
+
+- name: Find camera edge text files for path normalization
+  ansible.builtin.find:
+    paths: "{{ camera_edge_edge_dir }}"
+    file_type: file
+    patterns:
+      - "*.py"
+      - "*.sh"
+      - "*.md"
+      - "*.txt"
+      - "*.html"
+  register: camera_edge_text_files
+
+- name: Replace legacy hardcoded edge path in copied scripts
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: "/home/gmcmr2c/mri-cooling-camera/edge"
+    replace: "{{ camera_edge_edge_dir }}"
+  loop: "{{ camera_edge_text_files.files }}"
+
+- name: Replace legacy hardcoded venv path in copied scripts
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: "/home/gmcmr2c/mri-cooling-camera/venv"
+    replace: "{{ camera_edge_base_dir }}/venv"
+  loop: "{{ camera_edge_text_files.files }}"
+
+- name: Ensure camera edge shell scripts are executable
+  ansible.builtin.find:
+    paths: "{{ camera_edge_edge_dir }}"
+    patterns: "*.sh"
+    file_type: file
+  register: camera_edge_shell_scripts
+
+- name: Set execute bit on camera edge shell scripts
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: "0755"
+  loop: "{{ camera_edge_shell_scripts.files }}"
+
+- name: Install camera edge .env
+  ansible.builtin.template:
+    src: camera_edge.env.j2
+    dest: "{{ camera_edge_edge_dir }}/.env"
+    owner: "{{ mri_user }}"
+    group: "{{ mri_user }}"
+    mode: "0644"
+
+- name: Schedule camera captures (9:00 and 15:00 by default)
+  ansible.builtin.cron:
+    name: "mri-camera-scheduled-capture-{{ item }}"
+    state: "{{ 'present' if (camera_edge.install_cron | default(true)) else 'absent' }}"
+    minute: "0"
+    hour: "{{ item }}"
+    user: "{{ mri_user }}"
+    job: "{{ camera_edge_edge_dir }}/run_scheduled_capture.sh >> {{ camera_edge_edge_dir }}/logs/cron.log 2>&1"
+  loop: "{{ camera_edge.scheduled_hours | default([9, 15]) }}"
+
+- name: Schedule camera retry check (every N minutes)
+  ansible.builtin.cron:
+    name: "mri-camera-retry-check"
+    state: "{{ 'present' if (camera_edge.install_cron | default(true)) else 'absent' }}"
+    minute: "*/{{ camera_edge.retry_every_minutes | default(5) }}"
+    user: "{{ mri_user }}"
+    job: "{{ camera_edge_edge_dir }}/run_retry_check.sh >> {{ camera_edge_edge_dir }}/logs/cron.log 2>&1"
