@@ -22,8 +22,8 @@ temp_sensors:
   sensor_discovery_interval_sec: 5
   sensor_rescan_timeout_sec: 30
   sensor_rescan_interval_sec: 5
-  probe_in_id: 28-0000005376c4
-  probe_out_id: 28-000000537857
+  probe_in_id: 28-000000537857
+  probe_out_id: 28-0000005376c4
   probe_primary_in_id: 28-000000556aff
   probe_primary_out_id: 28-00000051b05f
   probe_room_id: 28-000000535859
