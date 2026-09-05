@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the CoolMRI OpenSSH health check
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+RandomizedDelaySec=20s
+AccuracySec=10s
+Unit=coolmri-sshd-health.service
+
+[Install]
+WantedBy=timers.target

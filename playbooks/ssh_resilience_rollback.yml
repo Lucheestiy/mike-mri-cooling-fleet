@@ -1,0 +1,75 @@
+---
+- name: Roll back the nearby MR3 dual-SSH recovery pilot
+  hosts: agcmr3
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    ansible_become_exe: /home/agcmr3/.local/bin/sudo-rs-ansible-compat
+    ssh_resilience_rollback_confirm: false
+
+  tasks:
+    - name: Require explicit rollback confirmation
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'agcmr3'
+          - ansible_check_mode or ssh_resilience_rollback_confirm | bool
+
+    - name: Disable Tailscale SSH first
+      ansible.builtin.command:
+        argv: [tailscale, set, --ssh=false]
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Stop and disable the health timer
+      ansible.builtin.systemd_service:
+        name: coolmri-sshd-health.timer
+        state: stopped
+        enabled: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Remove pilot-managed files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/ssh.socket.d/coolmri-openssh-rescue.conf
+        - /etc/systemd/system/coolmri-sshd-health.service
+        - /etc/systemd/system/coolmri-sshd-health.timer
+        - /usr/local/sbin/coolmri-sshd-health
+
+    - name: Reload systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: not ansible_check_mode
+
+    - name: Stop OpenSSH before rebuilding its standard socket
+      ansible.builtin.systemd_service:
+        name: ssh.service
+        state: stopped
+      when: not ansible_check_mode
+
+    - name: Restart the standard OpenSSH socket
+      ansible.builtin.systemd_service:
+        name: ssh.socket
+        state: restarted
+        enabled: true
+      when: not ansible_check_mode
+
+    - name: Restart the standard OpenSSH service
+      ansible.builtin.systemd_service:
+        name: ssh.service
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+
+    - name: Prove the standard SSH port from the controller
+      ansible.builtin.wait_for:
+        host: 100.103.6.98
+        port: 22
+        connect_timeout: 5
+        timeout: 20
+      delegate_to: localhost
+      become: false
+      when: not ansible_check_mode

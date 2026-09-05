@@ -1,0 +1,312 @@
+---
+- name: Prove automatic MRI sensor crash recovery on nearby AGC MR1
+  hosts: agcmr1
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    mri_restart_recovery_confirm: false
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    mri_service_name: mri-sensor.service
+    mri_helper_path: /usr/local/sbin/mri-sensor-service
+    mri_app_path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+    mri_target_sha256: 0d939f88b35ab8167ce1e70d91a8611a14f4a6a9631a30677bbe06bb5234a36f
+    mri_site_id: AGCMR1
+
+  pre_tasks:
+    - name: Require explicit one-host recovery-test confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or mri_restart_recovery_confirm | bool
+          - inventory_hostname == 'agcmr1'
+          - ansible_play_batch | length == 1
+        fail_msg: >-
+          Run --check first, then pass -e mri_restart_recovery_confirm=true.
+          The confirmed run terminates the AGC MR1 sensor process once and
+          requires systemd to recover it automatically.
+
+    - name: Load current backup evidence
+      ansible.builtin.set_fact:
+        recovery_backup: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select AGC MR1 backup evidence
+      ansible.builtin.set_fact:
+        recovery_backup_status: >-
+          {{ recovery_backup.repository_status
+             | selectattr('repository', 'equalto', 'agcmr1')
+             | list | first | default({}) }}
+
+    - name: Require successful recent backup evidence
+      ansible.builtin.assert:
+        that:
+          - recovery_backup.batch.result == 'success'
+          - recovery_backup.batch.timer_active | bool
+          - recovery_backup_status.activity_recent | default(false) | bool
+
+    - name: Inspect approved application
+      ansible.builtin.stat:
+        path: "{{ mri_app_path }}"
+        checksum_algorithm: sha256
+      register: recovery_app_before
+
+    - name: Record exact probe set
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: recovery_probes_before
+
+    - name: Capture effective service properties before recovery test
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ mri_service_name }}"
+          - -p
+          - ActiveState
+          - -p
+          - MainPID
+          - -p
+          - ActiveEnterTimestampMonotonic
+          - -p
+          - User
+          - -p
+          - Restart
+          - -p
+          - RestartUSec
+          - -p
+          - StartLimitIntervalUSec
+          - -p
+          - StartLimitBurst
+          - --no-pager
+      register: recovery_service_before
+      changed_when: false
+      check_mode: false
+
+    - name: Parse pre-test service properties
+      ansible.builtin.set_fact:
+        recovery_service_before_map: >-
+          {{ dict(recovery_service_before.stdout_lines
+             | map('split', '=', 1) | map('first')
+             | zip(recovery_service_before.stdout_lines
+             | map('split', '=', 1) | map('last'))) }}
+
+    - name: Require the installed resilient policy and healthy workload
+      ansible.builtin.assert:
+        that:
+          - recovery_app_before.stat.checksum == mri_target_sha256
+          - recovery_probes_before.matched | int == 5
+          - recovery_service_before_map.ActiveState == 'active'
+          - recovery_service_before_map.MainPID | int > 1
+          - recovery_service_before_map.User == ansible_user
+          - recovery_service_before_map.Restart == 'always'
+          - recovery_service_before_map.RestartUSec == '15s'
+          - recovery_service_before_map.StartLimitIntervalUSec == '0'
+          - recovery_service_before_map.StartLimitBurst == '5'
+
+    - name: Capture current production telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: recovery_telemetry_before_response
+
+    - name: Select current AGC MR1 telemetry
+      ansible.builtin.set_fact:
+        recovery_telemetry_before: >-
+          {{ recovery_telemetry_before_response.json
+             | selectattr('id', 'equalto', mri_site_id)
+             | list | first | default({}) }}
+
+    - name: Require current production telemetry
+      ansible.builtin.assert:
+        that:
+          - recovery_telemetry_before.id | default('') == mri_site_id
+          - not (recovery_telemetry_before.is_offline | default(true) | bool)
+          - recovery_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Exercise and verify automatic recovery
+      when: not ansible_check_mode
+      block:
+        - name: Record recovery-test start time
+          ansible.builtin.command:
+            argv: [date, +%s%3N]
+          register: recovery_started_ms
+          changed_when: false
+
+        - name: Terminate only the current sensor main process once
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - kill
+              - --kill-who=main
+              - --signal=SIGKILL
+              - "{{ mri_service_name }}"
+          changed_when: true
+
+        - name: Wait for systemd to create a new sensor process
+          ansible.builtin.command:
+            argv: [systemctl, show, "{{ mri_service_name }}", -p, MainPID, --value]
+          register: recovery_new_pid
+          changed_when: false
+          until:
+            - recovery_new_pid.stdout | int > 1
+            - recovery_new_pid.stdout != recovery_service_before_map.MainPID
+          retries: 20
+          delay: 2
+
+        - name: Record recovery completion time
+          ansible.builtin.command:
+            argv: [date, +%s%3N]
+          register: recovery_completed_ms
+          changed_when: false
+
+        - name: Capture recovered service properties
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - show
+              - "{{ mri_service_name }}"
+              - -p
+              - ActiveState
+              - -p
+              - MainPID
+              - -p
+              - ActiveEnterTimestampMonotonic
+              - -p
+              - User
+              - -p
+              - Restart
+              - -p
+              - RestartUSec
+              - -p
+              - StartLimitIntervalUSec
+              - -p
+              - StartLimitBurst
+              - --no-pager
+          register: recovery_service_after
+          changed_when: false
+
+        - name: Parse recovered service properties and duration
+          ansible.builtin.set_fact:
+            recovery_service_after_map: >-
+              {{ dict(recovery_service_after.stdout_lines
+                 | map('split', '=', 1) | map('first')
+                 | zip(recovery_service_after.stdout_lines
+                 | map('split', '=', 1) | map('last'))) }}
+            recovery_elapsed_ms: >-
+              {{ recovery_completed_ms.stdout | int - recovery_started_ms.stdout | int }}
+
+        - name: Prove a bounded automatic recovery under the effective policy
+          ansible.builtin.assert:
+            that:
+              - recovery_service_after_map.ActiveState == 'active'
+              - recovery_service_after_map.MainPID != recovery_service_before_map.MainPID
+              - recovery_service_after_map.ActiveEnterTimestampMonotonic != recovery_service_before_map.ActiveEnterTimestampMonotonic
+              - recovery_service_after_map.User == recovery_service_before_map.User
+              - recovery_service_after_map.Restart == 'always'
+              - recovery_service_after_map.RestartUSec == '15s'
+              - recovery_service_after_map.StartLimitIntervalUSec == '0'
+              - recovery_elapsed_ms | int >= 12000
+              - recovery_elapsed_ms | int <= 45000
+
+        - name: Verify recovered service through the restricted operator helper
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Recheck application checksum and probes
+          block:
+            - ansible.builtin.stat:
+                path: "{{ mri_app_path }}"
+                checksum_algorithm: sha256
+              register: recovery_app_after
+            - ansible.builtin.find:
+                paths: /sys/bus/w1/devices
+                patterns: "28-*"
+                file_type: link
+                recurse: false
+              register: recovery_probes_after
+            - ansible.builtin.assert:
+                that:
+                  - recovery_app_after.stat.checksum == recovery_app_before.stat.checksum
+                  - recovery_probes_after.files | map(attribute='path') | map('basename') | sort == recovery_probes_before.files | map(attribute='path') | map('basename') | sort
+
+        - name: Wait for recovered process telemetry to advance
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: recovery_telemetry_after_response
+          until: >-
+            ((recovery_telemetry_after_response.json
+              | selectattr('id', 'equalto', mri_site_id)
+              | list | first | default({})).last_updated | default(0) | int)
+            > (recovery_telemetry_before.last_updated | int)
+          retries: 18
+          delay: 10
+
+        - name: Select recovered production telemetry
+          ansible.builtin.set_fact:
+            recovery_telemetry_after: >-
+              {{ recovery_telemetry_after_response.json
+                 | selectattr('id', 'equalto', mri_site_id)
+                 | list | first | default({}) }}
+
+        - name: Write local recovery evidence
+          ansible.builtin.copy:
+            dest: >-
+              {{ playbook_dir }}/../reports/restart_recovery_{{ now(utc=true, fmt='%Y%m%d_%H%M%S') }}.json
+            mode: "0644"
+            content: >-
+              {{ {
+                'kind': 'mri_restart_recovery_verification',
+                'ok': true,
+                'inventory_name': inventory_hostname,
+                'site_id': mri_site_id,
+                'created_at': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+                'service': mri_service_name,
+                'before': recovery_service_before_map,
+                'after': recovery_service_after_map,
+                'recovery_elapsed_ms': recovery_elapsed_ms | int,
+                'application_sha256': recovery_app_after.stat.checksum,
+                'probe_ids': recovery_probes_after.files | map(attribute='path') | map('basename') | sort,
+                'telemetry_before': recovery_telemetry_before.last_updated | int,
+                'telemetry_after': recovery_telemetry_after.last_updated | int,
+                'backup_repository': 'agcmr1'
+              } | to_nice_json }}
+          delegate_to: localhost
+          become: false
+
+      rescue:
+        - name: Inspect sensor after failed recovery test
+          ansible.builtin.command:
+            argv: [systemctl, is-active, "{{ mri_service_name }}"]
+          register: recovery_rescue_state
+          changed_when: false
+          failed_when: false
+
+        - name: Recover sensor manually only if automatic recovery did not
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", restart]
+          become: false
+          when: recovery_rescue_state.rc != 0
+
+        - name: Require active sensor after rescue
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop after preserving sensor availability
+          ansible.builtin.fail:
+            msg: Automatic recovery verification failed; the sensor was left active.

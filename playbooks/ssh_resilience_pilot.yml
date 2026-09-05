@@ -1,0 +1,117 @@
+---
+- name: Install the nearby MR3 dual-SSH recovery pilot
+  hosts: agcmr3
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    ansible_become_exe: /home/agcmr3/.local/bin/sudo-rs-ansible-compat
+    ssh_resilience_confirm: false
+    ssh_resilience_port: 2222
+    ssh_resilience_tailscale_ipv4: 100.103.6.98
+
+  tasks:
+    - name: Install the reversible SSH-resilience role
+      block:
+        - name: Apply the SSH-resilience role
+          ansible.builtin.include_role:
+            name: ssh_resilience
+
+        - name: Prove the rescue listener from the controller
+          ansible.builtin.wait_for:
+            host: "{{ ssh_resilience_tailscale_ipv4 }}"
+            port: "{{ ssh_resilience_port }}"
+            connect_timeout: 5
+            timeout: 20
+          delegate_to: localhost
+          become: false
+          when: not ansible_check_mode
+
+        - name: Reconnect through the new ordinary OpenSSH port
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -p
+              - "{{ ssh_resilience_port | string }}"
+              - -i
+              - /home/mlweb/.ssh/mri_pi_fleet_ed25519
+              - -o
+              - BatchMode=yes
+              - -o
+              - IdentitiesOnly=yes
+              - -o
+              - StrictHostKeyChecking=accept-new
+              - -o
+              - ConnectTimeout=8
+              - "agcmr3@{{ ssh_resilience_tailscale_ipv4 }}"
+              - "test \"$(id -un)\" = agcmr3"
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Require critical MR3 services after the listener rebuild
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - is-active
+              - "{{ item }}"
+          loop:
+            - ssh.socket
+            - ssh.service
+            - tailscaled.service
+            - mri-sensor.service
+            - coolmri-sshd-health.timer
+          changed_when: false
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Disable Tailscale SSH during automatic rollback
+          ansible.builtin.command:
+            argv: [tailscale, set, --ssh=false]
+          changed_when: true
+          failed_when: false
+
+        - name: Stop the pilot timer during automatic rollback
+          ansible.builtin.systemd_service:
+            name: coolmri-sshd-health.timer
+            state: stopped
+            enabled: false
+          failed_when: false
+
+        - name: Remove pilot-managed files during automatic rollback
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/systemd/system/ssh.socket.d/coolmri-openssh-rescue.conf
+            - /etc/systemd/system/coolmri-sshd-health.service
+            - /etc/systemd/system/coolmri-sshd-health.timer
+            - /usr/local/sbin/coolmri-sshd-health
+
+        - name: Restore the standard OpenSSH listener
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+
+        - name: Stop OpenSSH before rebuilding its standard socket
+          ansible.builtin.systemd_service:
+            name: ssh.service
+            state: stopped
+          failed_when: false
+
+        - name: Restart the standard OpenSSH socket
+          ansible.builtin.systemd_service:
+            name: ssh.socket
+            state: restarted
+            enabled: true
+
+        - name: Restart the standard OpenSSH service
+          ansible.builtin.systemd_service:
+            name: ssh.service
+            state: started
+            enabled: true
+
+        - name: Stop after successful automatic rollback
+          ansible.builtin.fail:
+            msg: The MR3 SSH-resilience pilot failed and its remote changes were rolled back.

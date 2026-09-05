@@ -1,0 +1,200 @@
+---
+- name: Install backward-compatible restricted Pi pull support
+  hosts: backup_hub
+  gather_facts: false
+  become: true
+  vars:
+    backup_hub_pull_helper_confirm: false
+    backup_hub_pull_helper_path: /usr/local/sbin/restic-pi-pull-backup
+    backup_hub_status_refresh_path: /usr/local/sbin/restic-pi-backup-status-refresh
+    backup_hub_canary_ids:
+      - gcmcmr2
+      - agcmr2
+      - vwm2
+      - vwm3
+    backup_hub_repo_base: /mnt/t7backup/restic-pi-repos
+
+  tasks:
+    - name: Require explicit helper-change confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or backup_hub_pull_helper_confirm | bool
+          - backup_hub_canary_ids == ['gcmcmr2', 'agcmr2', 'vwm2', 'vwm3']
+        fail_msg: Run --check first, then pass -e backup_hub_pull_helper_confirm=true.
+
+    - name: Verify the existing hub helper and canary target records
+      ansible.builtin.shell: |
+        set -eu
+        test -x {{ backup_hub_pull_helper_path | quote }}
+        findmnt -rn /mnt/t7backup >/dev/null
+        test -s /root/.config/restic-backup/password
+        test -s /root/.ssh/pi_backup_pull_ed25519
+      args:
+        executable: /bin/bash
+      check_mode: false
+      changed_when: false
+
+    - name: Require every concurrency canary in the production catalog
+      ansible.builtin.command:
+        argv:
+          - grep
+          - -qE
+          - "^{{ item }}\\|"
+          - /etc/restic-pi-backup-targets.psv
+      loop: "{{ backup_hub_canary_ids }}"
+      check_mode: false
+      changed_when: false
+
+    - name: Install and prove the restricted-export-compatible helper
+      block:
+        - name: Install canonical hub pull helper
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../roles/backup_hub/files/restic-pi-pull-backup"
+            dest: "{{ backup_hub_pull_helper_path }}"
+            owner: root
+            group: root
+            mode: "0755"
+            backup: true
+            validate: /bin/bash -n %s
+          register: backup_hub_pull_helper_copy
+
+        - name: Install successful-snapshot status refresher
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../roles/backup_hub/files/restic-pi-backup-status-refresh"
+            dest: "{{ backup_hub_status_refresh_path }}"
+            owner: root
+            group: root
+            mode: "0755"
+            backup: true
+            validate: /bin/bash -n %s
+          register: backup_hub_status_refresh_copy
+
+        - name: Prove the restricted canary export path
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -i
+              - /root/.ssh/pi_backup_pull_ed25519
+              - -o
+              - BatchMode=yes
+              - -o
+              - ConnectTimeout=12
+              - gcmc2@100.67.249.11
+              - sudo
+              - -n
+              - /usr/local/sbin/pi-backup-export
+              - check
+          check_mode: false
+          changed_when: false
+
+        - name: Prove one legacy target remains reachable for fallback
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -i
+              - /root/.ssh/pi_backup_pull_ed25519
+              - -o
+              - BatchMode=yes
+              - -o
+              - ConnectTimeout=12
+              - agcmr3@100.103.6.98
+              - "true"
+          check_mode: false
+          changed_when: false
+
+        - name: Capture the concurrent canary start boundary
+          ansible.builtin.command: date +%s
+          register: backup_hub_canary_started
+          check_mode: false
+          changed_when: false
+
+        - name: Run four real repository canaries in one helper invocation
+          ansible.builtin.command:
+            argv: "{{ [backup_hub_pull_helper_path] + backup_hub_canary_ids }}"
+          register: backup_hub_canary_backup
+          changed_when: true
+          when: not ansible_check_mode
+
+        - name: Verify each new encrypted snapshot and atomic marker
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            export HOME=/root
+            export RESTIC_CACHE_DIR=/root/.cache/restic
+            export RESTIC_PASSWORD_FILE=/root/.config/restic-backup/password
+            marker="/var/lib/coolmri-fleet/backup-status/{{ item }}.json"
+            test -r "$marker"
+            snapshot="$(restic -r {{ (backup_hub_repo_base + '/' + item) | quote }} \
+              snapshots --host {{ item | quote }} --tag pi-pull --json \
+              | jq -r 'sort_by(.time) | last | .id // empty')"
+            test -n "$snapshot"
+            test "$(jq -r '.status' "$marker")" = success
+            test "$(jq -r '.snapshot_id' "$marker")" = "$snapshot"
+            completed="$(date -d "$(jq -r '.completed_at' "$marker")" +%s)"
+            test "$completed" -ge {{ backup_hub_canary_started.stdout | int }}
+          args:
+            executable: /bin/bash
+          changed_when: false
+          loop: "{{ backup_hub_canary_ids }}"
+          when: not ansible_check_mode
+
+        - name: Decrypt and restore-test every new canary snapshot in tmpfs
+          ansible.builtin.command:
+            argv:
+              - /usr/local/sbin/coolmri-restic-restore-test
+              - "{{ item }}"
+          loop: "{{ backup_hub_canary_ids }}"
+          changed_when: true
+          when: not ansible_check_mode
+
+        - name: Require restore reports to match the exact new markers
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            marker="/var/lib/coolmri-fleet/backup-status/{{ item }}.json"
+            restore="/var/lib/coolmri-fleet/restore-tests/{{ item }}.json"
+            test "$(jq -r '.status' "$restore")" = success
+            test "$(jq -r '.snapshot_id' "$restore")" = "$(jq -r '.snapshot_id' "$marker")"
+          args:
+            executable: /bin/bash
+          loop: "{{ backup_hub_canary_ids }}"
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Publish authoritative successful-snapshot markers
+          ansible.builtin.command:
+            argv:
+              - "{{ backup_hub_status_refresh_path }}"
+          changed_when: true
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Restore the prior successful-snapshot status refresher
+          ansible.builtin.copy:
+            src: "{{ backup_hub_status_refresh_copy.backup_file }}"
+            dest: "{{ backup_hub_status_refresh_path }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          when: backup_hub_status_refresh_copy.backup_file | default('') | length > 0
+
+        - name: Remove a newly introduced status refresher after failure
+          ansible.builtin.file:
+            path: "{{ backup_hub_status_refresh_path }}"
+            state: absent
+          when:
+            - backup_hub_status_refresh_copy.changed | default(false)
+            - backup_hub_status_refresh_copy.backup_file | default('') | length == 0
+
+        - name: Restore the prior hub pull helper
+          ansible.builtin.copy:
+            src: "{{ backup_hub_pull_helper_copy.backup_file }}"
+            dest: "{{ backup_hub_pull_helper_path }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          when: backup_hub_pull_helper_copy.backup_file | default('') | length > 0
+
+        - name: Stop after helper rollback
+          ansible.builtin.fail:
+            msg: The restricted pull canary failed; the prior hub helper was restored.

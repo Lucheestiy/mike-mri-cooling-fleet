@@ -1,0 +1,94 @@
+---
+- name: Roll back one guarded MRI or CV headless service host
+  hosts: agcmr1:agcmr3:gbh:gmcep1and2:gmcep3:gmcir3:gwvskyra:shmr:vwm3
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    headless_pilot_disable_units:
+      - ModemManager.service
+      - bluetooth.service
+      - cups.service
+      - cups-browsed.service
+      - cups.socket
+      - cups.path
+    headless_pilot_stop_only_units:
+      - gdm.service
+      - colord.service
+  pre_tasks:
+    - name: Require explicit rollback confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or headless_services_rollback_confirm | default(false) | bool
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname in ['agcmr1', 'agcmr3', 'gbh', 'gmcep1and2', 'gmcep3', 'gmcir3', 'gwvskyra', 'shmr', 'vwm3']
+        fail_msg: >-
+          Use --limit for exactly one pilot and pass
+          -e headless_services_rollback_confirm=true to restore it.
+
+    - name: Read saved pre-pilot state
+      ansible.builtin.slurp:
+        src: /var/lib/coolmri/headless-services-pilot-before.json
+      register: headless_saved_state
+      failed_when: false
+
+    - name: Select saved default target
+      ansible.builtin.set_fact:
+        headless_saved_payload: >-
+          {{ (headless_saved_state.content | default('') | b64decode | from_json)
+             if headless_saved_state.content | default('') | length > 0
+             else {} }}
+
+    - name: Select saved default target and exact-state availability
+      ansible.builtin.set_fact:
+        headless_restore_target: >-
+          {{ headless_saved_payload.default_target | default('graphical.target') }}
+        headless_saved_unit_states: "{{ headless_saved_payload.unit_states | default({}) }}"
+        headless_exact_restore: >-
+          {{ (headless_saved_payload.unit_states | default({}) | length)
+             == ((headless_pilot_disable_units + headless_pilot_stop_only_units) | length) }}
+  tasks:
+    - name: Restore graphical boot target
+      ansible.builtin.command:
+        argv: [systemctl, set-default, "{{ headless_restore_target }}"]
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Restore exact saved unit-file states
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: "{{ headless_saved_unit_states[item].unit_file_state == 'enabled' }}"
+      loop: "{{ headless_pilot_disable_units }}"
+      when:
+        - not ansible_check_mode
+        - headless_exact_restore | bool
+        - headless_saved_unit_states[item].unit_file_state in ['enabled', 'disabled']
+
+    - name: Restore exact saved active states
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: "{{ 'started' if headless_saved_unit_states[item].active_state == 'active' else 'stopped' }}"
+      loop: "{{ headless_pilot_disable_units + headless_pilot_stop_only_units }}"
+      when:
+        - not ansible_check_mode
+        - headless_exact_restore | bool
+
+    - name: Restore legacy peripheral defaults when exact state is unavailable
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: "{{ headless_pilot_disable_units }}"
+      when:
+        - not ansible_check_mode
+        - not (headless_exact_restore | bool)
+
+    - name: Restart legacy static desktop helpers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: started
+      loop: "{{ headless_pilot_stop_only_units }}"
+      when:
+        - not ansible_check_mode
+        - not (headless_exact_restore | bool)

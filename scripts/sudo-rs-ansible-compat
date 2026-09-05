@@ -1,0 +1,45 @@
+#!/bin/bash
+# sudo-rs accepts -S input but does not emit Ansible's custom become prompt.
+# Echo that prompt for Ansible, replace it with an empty sudo-rs prompt, and
+# otherwise pass every argument and stdin byte through unchanged.
+set -euo pipefail
+
+sudo_binary="${SUDO_BINARY:-/usr/bin/sudo}"
+
+args=()
+prompt=""
+while (($#)); do
+    if [[ "$1" == "-p" && $# -ge 2 ]]; then
+        prompt="$2"
+        args+=("-p" "")
+        shift 2
+    else
+        args+=("$1")
+        shift
+    fi
+done
+
+# Some sudo-rs/PTY combinations do not disable terminal echo before Ansible sends
+# the become password. Suppress input echo for the entire child command and restore
+# the terminal afterward. This does not alter command stdout/stderr.
+terminal_echo_disabled=false
+if [[ -t 0 ]]; then
+    stty -echo
+    terminal_echo_disabled=true
+fi
+restore_terminal() {
+    if [[ "$terminal_echo_disabled" == true ]]; then
+        stty echo || true
+    fi
+}
+trap restore_terminal EXIT HUP INT TERM
+
+printf '%s' "$prompt" >&2
+
+set +e
+"$sudo_binary" "${args[@]}"
+status=$?
+set -e
+restore_terminal
+terminal_echo_disabled=false
+exit "$status"

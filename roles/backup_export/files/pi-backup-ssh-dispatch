@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  "sudo -n /usr/local/sbin/pi-backup-export")
+    exec sudo -n /usr/local/sbin/pi-backup-export
+    ;;
+  "sudo -n /usr/local/sbin/pi-backup-export check")
+    exec sudo -n /usr/local/sbin/pi-backup-export check
+    ;;
+  *)
+    echo "Backup SSH key is restricted to the fixed export helper" >&2
+    exit 126
+    ;;
+esac

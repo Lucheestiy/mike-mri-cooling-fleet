@@ -1,0 +1,17 @@
+[Unit]
+Description=Plan and run read-only natural proofs after guarded camera v3 deployments
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mlweb
+Group=mlweb
+WorkingDirectory=/home/mlweb/mri-cooling-pi-fleet
+ExecStart=/home/mlweb/mri-cooling-pi-fleet/.venv/bin/python /home/mlweb/mri-cooling-pi-fleet/scripts/camera_proof_planner.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/mlweb/mri-cooling-pi-fleet/reports
+TimeoutStartSec=650

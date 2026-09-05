@@ -1,0 +1,15 @@
+[Unit]
+Description=Capture GCMC MR2 pre-schedule camera RAM-log proof baseline
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/mlweb/mri-cooling-pi-fleet
+ExecStart=/home/mlweb/mri-cooling-pi-fleet/scripts/start_camera_observation.sh gcmcmr2 GCMCMR2 10 2026-07-18T09:00:00-04:00 camera_ocr preserve
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/mlweb/mri-cooling-pi-fleet/reports
+TimeoutStartSec=180

@@ -1,0 +1,50 @@
+---
+- name: Restore persistent rsyslog on one nearby profile canary
+  hosts: gmcir3:agcmr1
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    rsyslog_pilot_state_path: /var/lib/coolmri/rsyslog-ram-pilot-before.json
+    rsyslog_pilot_evidence_path: /var/lib/coolmri-fleet/rsyslog-ram-pilot.json
+
+  pre_tasks:
+    - name: Require explicit one-host rollback confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or rsyslog_ram_rollback_confirm | default(false) | bool
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname in ['gmcir3', 'agcmr1']
+
+    - name: Read exact pre-pilot state
+      ansible.builtin.slurp:
+        src: "{{ rsyslog_pilot_state_path }}"
+      register: rsyslog_pilot_saved_state
+
+    - name: Parse exact pre-pilot state
+      ansible.builtin.set_fact:
+        rsyslog_pilot_state: "{{ rsyslog_pilot_saved_state.content | b64decode | from_json }}"
+
+  tasks:
+    - name: Restore exact prior rsyslog state
+      ansible.builtin.systemd_service:
+        name: rsyslog.service
+        enabled: "{{ rsyslog_pilot_state.enabled == 'enabled' }}"
+        state: "{{ 'started' if rsyslog_pilot_state.active == 'active' else 'stopped' }}"
+      when: not ansible_check_mode
+
+    - name: Verify restored state
+      ansible.builtin.shell: >-
+        test "$(systemctl is-active rsyslog.service || true)" = "{{ rsyslog_pilot_state.active }}"
+        && test "$(systemctl is-enabled rsyslog.service || true)" = "{{ rsyslog_pilot_state.enabled }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Remove sanitized active-pilot marker after verified rollback
+      ansible.builtin.file:
+        path: "{{ rsyslog_pilot_evidence_path }}"
+        state: absent
+      when: not ansible_check_mode

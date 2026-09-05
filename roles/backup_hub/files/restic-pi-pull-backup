@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+MOUNT=/mnt/t7backup
+BASE=/mnt/t7backup/restic-pi-repos
+TARGETS=/etc/restic-pi-backup-targets.psv
+LOG_FILE=/var/log/restic-pi-pull-backup.log
+LOCK_FILE=/run/restic-pi-pull-backup.lock
+STATUS_DIR=/var/lib/coolmri-fleet/backup-status
+HISTORY_DIR=$STATUS_DIR/history
+SSH_KEY=/root/.ssh/pi_backup_pull_ed25519
+REQUESTED_TARGETS=("$@")
+CONCURRENCY="${COOLMRI_BACKUP_CONCURRENCY:-4}"
+
+export HOME=/root
+export XDG_CACHE_HOME=/root/.cache
+export RESTIC_CACHE_DIR=/root/.cache/restic
+export RESTIC_PASSWORD_FILE=/root/.config/restic-backup/password
+
+mkdir -p "$(dirname "$LOG_FILE")" "$RESTIC_CACHE_DIR" "$STATUS_DIR" "$HISTORY_DIR"
+chmod 0755 "$STATUS_DIR"
+touch "$LOG_FILE"
+chmod 0600 "$LOG_FILE"
+exec >>"$LOG_FILE" 2>&1
+
+echo "[$(date --iso-8601=seconds)] Starting Pi pull backup batch"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[$(date --iso-8601=seconds)] Another Pi backup batch is already running; exiting."
+  exit 0
+fi
+
+if ! findmnt -rn "$MOUNT" >/dev/null 2>&1; then
+  echo "SKIP: $MOUNT is not mounted"
+  exit 0
+fi
+if [[ ! -s "$RESTIC_PASSWORD_FILE" ]]; then
+  echo "ERROR: missing Restic password file: $RESTIC_PASSWORD_FILE"
+  exit 1
+fi
+if [[ ! -s "$SSH_KEY" ]]; then
+  echo "ERROR: missing SSH key: $SSH_KEY"
+  exit 1
+fi
+if [[ ! -r "$TARGETS" ]]; then
+  echo "ERROR: missing target list: $TARGETS"
+  exit 1
+fi
+if [[ ! "$CONCURRENCY" =~ ^[1-8]$ ]]; then
+  echo "ERROR: COOLMRI_BACKUP_CONCURRENCY must be an integer from 1 through 8"
+  exit 1
+fi
+
+mkdir -p "$BASE"
+failures=()
+ssh_options=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=12)
+BATCH_STATE_DIR="$(mktemp -d /run/restic-pi-pull-backup.XXXXXX)"
+
+target_requested() {
+  ((${#REQUESTED_TARGETS[@]} == 0)) && return 0
+  local requested
+  for requested in "${REQUESTED_TARGETS[@]}"; do
+    [[ "$requested" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+target_failure() {
+  local id="$1" reason="$2"
+  printf '%s\n' "$reason" >"$BATCH_STATE_DIR/$id.failure"
+  return 1
+}
+
+backup_target() {
+  local id="$1" user="$2" ip="$3" label="$4" port="${5:-22}"
+  local repo="$BASE/$id"
+  local canonical_export=false backup_ok=false latest_snapshot=""
+  local snapshot_id snapshot_time completed_at status_tmp history_tmp remote_user_quoted
+  local retention_ok=true status_ok=true
+  local -a target_ssh_options
+
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+    echo "ERROR: invalid SSH port for $id"
+    target_failure "$id" target-port
+    return
+  fi
+  target_ssh_options=("${ssh_options[@]}" -p "$port")
+
+  echo "[$(date --iso-8601=seconds)] Target $id ($label) $user@$ip:$port"
+  mkdir -p "$repo"
+
+  if ! restic -r "$repo" snapshots >/dev/null 2>&1; then
+    if ! restic -r "$repo" init; then
+      echo "ERROR: failed to initialize repo for $id"
+      target_failure "$id" init
+      return
+    fi
+  fi
+
+  if ssh -n "${target_ssh_options[@]}" "$user@$ip" sudo -n /usr/local/sbin/pi-backup-export check >/dev/null 2>&1; then
+    canonical_export=true
+  elif ! ssh -n "${target_ssh_options[@]}" "$user@$ip" true; then
+    echo "WARN: SSH unavailable for $id; skipping"
+    target_failure "$id" ssh
+    return
+  fi
+
+  if $canonical_export; then
+    echo "[$(date --iso-8601=seconds)] Using restricted canonical export for $id"
+    if ssh -n "${target_ssh_options[@]}" "$user@$ip" sudo -n /usr/local/sbin/pi-backup-export \
+      | restic -r "$repo" backup --stdin --stdin-filename "${id}-$(date +%F).tar" --host "$id" --tag pi-pull; then
+      backup_ok=true
+    fi
+  else
+    echo "[$(date --iso-8601=seconds)] Using reviewed legacy export fallback for $id"
+    remote_user_quoted=$(printf "%q" "$user")
+    if ssh "${target_ssh_options[@]}" "$user@$ip" "bash -s -- $remote_user_quoted" <<'REMOTE_TAR' \
+      | restic -r "$repo" backup --stdin --stdin-filename "${id}-$(date +%F).tar" --host "$id" --tag pi-pull; then
+set -uo pipefail
+REMOTE_USER="$1"
+paths=()
+for p in "/home/$REMOTE_USER" /etc /usr/lib/os-release /usr/local /opt /srv /boot/firmware /boot; do
+  [ -e "$p" ] && paths+=("$p")
+done
+if [ "${#paths[@]}" -eq 0 ]; then
+  exit 2
+fi
+tar --one-file-system --ignore-failed-read --warning=no-file-changed \
+  --exclude=.cache --exclude=*/.cache --exclude=*/__pycache__ --exclude=*.pyc \
+  -cpf - "${paths[@]}"
+REMOTE_TAR
+      backup_ok=true
+    fi
+  fi
+
+  if $backup_ok; then
+    if latest_snapshot=$(restic -r "$repo" snapshots --host "$id" --tag pi-pull --json \
+      | jq -c 'sort_by(.time) | last // empty') && [[ -n "$latest_snapshot" ]]; then
+      snapshot_id=$(jq -r '.id' <<<"$latest_snapshot")
+      snapshot_time=$(jq -r '.time' <<<"$latest_snapshot")
+      completed_at=$(date --iso-8601=seconds)
+      status_tmp=$(mktemp "$STATUS_DIR/.${id}.XXXXXX")
+      jq -n \
+        --arg repository "$id" \
+        --arg snapshot_id "$snapshot_id" \
+        --arg snapshot_time "$snapshot_time" \
+        --arg completed_at "$completed_at" \
+        '{repository: $repository, status: "success", snapshot_id: $snapshot_id,
+          snapshot_time: $snapshot_time, completed_at: $completed_at}' >"$status_tmp"
+      chmod 0644 "$status_tmp"
+      mv -f "$status_tmp" "$STATUS_DIR/$id.json"
+      mkdir -p "$HISTORY_DIR/$id"
+      history_tmp=$(mktemp "$HISTORY_DIR/$id/.${snapshot_id}.XXXXXX")
+      cp "$STATUS_DIR/$id.json" "$history_tmp"
+      chmod 0644 "$history_tmp"
+      mv -f "$history_tmp" "$HISTORY_DIR/$id/$snapshot_id.json"
+    else
+      echo "WARN: could not publish successful snapshot status for $id"
+      status_ok=false
+    fi
+    if ! restic -r "$repo" forget --host "$id" --keep-daily 14 --keep-weekly 8 --keep-monthly 6 --prune; then
+      echo "WARN: forget/prune failed for $id"
+      retention_ok=false
+    fi
+    echo "[$(date --iso-8601=seconds)] Complete $id"
+    if ! $status_ok; then
+      target_failure "$id" status
+    elif ! $retention_ok; then
+      target_failure "$id" retention
+    fi
+  else
+    echo "ERROR: backup failed for $id"
+    target_failure "$id" backup
+  fi
+}
+
+group_pids=()
+group_ids=()
+
+wait_group() {
+  local index pid id reason
+  for index in "${!group_pids[@]}"; do
+    pid="${group_pids[$index]}"
+    id="${group_ids[$index]}"
+    if ! wait "$pid"; then
+      reason="$(<"$BATCH_STATE_DIR/$id.failure")"
+      failures+=("$id:$reason")
+    fi
+  done
+  group_pids=()
+  group_ids=()
+}
+
+echo "[$(date --iso-8601=seconds)] Backup concurrency limit: $CONCURRENCY"
+
+# Keep the target catalog on its own descriptor. SSH and the legacy heredoc use
+# standard input and must never consume the remaining target records. Each
+# background worker owns a different Restic repository; groups bound pressure on
+# the backup SSD while still using independent hospital links concurrently.
+while IFS="|" read -r -u 3 id user ip label reported_host port; do
+  [[ -n "${id:-}" ]] || continue
+  target_requested "$id" || continue
+  backup_target "$id" "$user" "$ip" "$label" "${port:-22}" &
+  group_pids+=("$!")
+  group_ids+=("$id")
+  if ((${#group_pids[@]} >= CONCURRENCY)); then
+    wait_group
+  fi
+done 3< "$TARGETS"
+wait_group
+
+echo "[$(date --iso-8601=seconds)] Pi pull backup batch finished"
+rm -rf -- "$BATCH_STATE_DIR"
+if ((${#failures[@]})); then
+  failure_list=$(IFS=,; echo "${failures[*]}")
+  /usr/local/sbin/telegram-system-notify \
+    --status failure \
+    --unit restic-pi-pull-backup.service \
+    --message "Pi backup issues: ${failure_list}" || true
+  exit 1
+fi
+
+/usr/local/sbin/telegram-system-notify \
+  --status success \
+  --unit restic-pi-pull-backup.service \
+  --message "Pi backup targets and retention jobs completed: ${REQUESTED_TARGETS[*]:-all configured targets}." || true

@@ -1,0 +1,290 @@
+- name: Correct the backed Muncy MRI root-service exception
+  hosts: muncymr
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    mri_nonroot_exception_confirm: false
+    mri_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    mri_unit_path: /etc/systemd/system/mri-sensor.service
+    temp_sensors_project_dir: "/home/{{ ansible_user }}/mike-mri-cooling"
+    mri_python_path: "{{ temp_sensors_project_dir }}/venv/bin/python3"
+    mri_program_path: "{{ temp_sensors_project_dir }}/src/pi_sensor.py"
+    mri_helper_path: /usr/local/sbin/mri-sensor-service
+    mri_target_sha256: 0d939f88b35ab8167ce1e70d91a8611a14f4a6a9631a30677bbe06bb5234a36f
+    mri_data_site_id: MuncySola
+
+  pre_tasks:
+    - name: Require explicit Muncy exception confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or mri_nonroot_exception_confirm | bool
+          - ansible_play_batch | length == 1
+          - inventory_hostname == 'muncymr'
+        fail_msg: >-
+          Run --check first, then pass
+          -e mri_nonroot_exception_confirm=true for Muncy only.
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Load controller backup evidence
+      ansible.builtin.set_fact:
+        backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select Muncy backup activity
+      ansible.builtin.set_fact:
+        host_backup_status: >-
+          {{ backup_evidence.repository_status
+             | selectattr('repository', 'equalto', inventory_hostname)
+             | list | first | default({}) }}
+
+    - name: Enforce successful recent backup gate
+      ansible.builtin.assert:
+        that:
+          - backup_evidence.batch.result == 'success'
+          - backup_evidence.batch.timer_active | bool
+          - host_backup_status.activity_recent | default(false) | bool
+
+    - name: Preserve exact pre-change MRI service unit
+      ansible.builtin.slurp:
+        src: "{{ mri_unit_path }}"
+      register: prior_mri_unit
+
+    - name: Inspect approved MRI sensor program
+      ansible.builtin.stat:
+        path: "{{ mri_program_path }}"
+        checksum_algorithm: sha256
+      register: mri_program
+
+    - name: Inspect MRI virtual-environment Python
+      ansible.builtin.stat:
+        path: "{{ mri_python_path }}"
+      register: mri_python
+
+    - name: Count current physical 1-Wire probes
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: physical_probes
+
+    - name: Read current service user
+      ansible.builtin.command: systemctl show mri-sensor.service -p User --value
+      changed_when: false
+      check_mode: false
+      register: prior_service_user
+
+    - name: Prove Muncy account can read configuration and all probes
+      ansible.builtin.command:
+        argv:
+          - "{{ mri_python_path }}"
+          - -c
+          - >-
+            from pathlib import Path;
+            from dotenv import dotenv_values;
+            from w1thermsensor import W1ThermSensor;
+            v=dotenv_values(Path('{{ temp_sensors_project_dir }}/.env'));
+            assert v.get('SITE_NAME') == 'MuncySola';
+            assert len(W1ThermSensor.get_available_sensors()) == 5
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Verify Muncy correction prerequisites
+      ansible.builtin.assert:
+        that:
+          - prior_service_user.stdout | trim == 'root'
+          - mri_program.stat.checksum == mri_target_sha256
+          - mri_python.stat.exists
+          - mri_python.stat.executable
+          - physical_probes.matched | int == 5
+
+    - name: Verify MRI sensor is active before correction
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Capture Muncy telemetry before correction
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: telemetry_before_response
+
+    - name: Select pre-change Muncy telemetry
+      ansible.builtin.set_fact:
+        telemetry_before: >-
+          {{ telemetry_before_response.json
+             | selectattr('id', 'equalto', mri_data_site_id)
+             | list | first | default({}) }}
+
+    - name: Require current pre-change Muncy telemetry
+      ansible.builtin.assert:
+        that:
+          - telemetry_before.id | default('') == mri_data_site_id
+          - not (telemetry_before.is_offline | default(true) | bool)
+          - telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Install and verify canonical site-account MRI unit
+      block:
+        - name: Install canonical MRI service unit
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/temp_sensors/templates/mri-sensor.service.j2"
+            dest: "{{ mri_unit_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+            validate: systemd-analyze verify %s
+          register: mri_unit_change
+
+        - name: Reload and restart changed MRI service
+          ansible.builtin.systemd:
+            name: mri-sensor.service
+            daemon_reload: true
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - mri_unit_change.changed
+
+        - name: Allow MRI sensor startup
+          ansible.builtin.pause:
+            seconds: 12
+          when:
+            - not ansible_check_mode
+            - mri_unit_change.changed
+
+        - name: Read effective MRI service identity
+          ansible.builtin.command: systemctl show mri-sensor.service -p User -p Group --no-pager
+          changed_when: false
+          check_mode: false
+          register: mri_service_identity
+          when: not ansible_check_mode
+
+        - name: Require Muncy site-account service identity
+          ansible.builtin.assert:
+            that:
+              - "('User=' ~ mri_user) in mri_service_identity.stdout"
+              - "('Group=' ~ mri_user) in mri_service_identity.stdout"
+          when: not ansible_check_mode
+
+        - name: Verify MRI sensor remains active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+          check_mode: false
+          when: not ansible_check_mode
+
+        - name: Read bounded post-change MRI logs
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", recent-logs]
+          become: false
+          changed_when: false
+          check_mode: false
+          register: mri_sensor_logs
+          when: not ansible_check_mode
+
+        - name: Prove MRI restart matched all probes without errors
+          ansible.builtin.assert:
+            that:
+              - "'Traceback (most recent call last)' not in mri_sensor_logs.stdout"
+              - "'Matched helium_in sensor:' in mri_sensor_logs.stdout"
+              - "'Matched helium_out sensor:' in mri_sensor_logs.stdout"
+              - "'Matched primary_in sensor:' in mri_sensor_logs.stdout"
+              - "'Matched primary_out sensor:' in mri_sensor_logs.stdout"
+              - "'Matched room sensor:' in mri_sensor_logs.stdout"
+          when: not ansible_check_mode
+
+        - name: Wait for Muncy telemetry to advance
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: telemetry_after_response
+          until: >-
+            ((telemetry_after_response.json
+              | selectattr('id', 'equalto', mri_data_site_id)
+              | list | first | default({})).last_updated | default(0) | int)
+            > (telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+          when: not ansible_check_mode
+
+        - name: Select post-change Muncy telemetry
+          ansible.builtin.set_fact:
+            telemetry_after: >-
+              {{ telemetry_after_response.json
+                 | selectattr('id', 'equalto', mri_data_site_id)
+                 | list | first | default({}) }}
+          when: not ansible_check_mode
+
+        - name: Prove mapped Muncy readings remain live
+          ansible.builtin.assert:
+            that:
+              - not (telemetry_after.is_offline | default(true) | bool)
+              - telemetry_after.last_updated | int > telemetry_before.last_updated | int
+              - telemetry_after.helium_in is number
+              - telemetry_after.helium_out is number
+              - telemetry_after.primary_in is number
+              - telemetry_after.primary_out is number
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Restore exact pre-change MRI service unit
+          ansible.builtin.copy:
+            content: "{{ prior_mri_unit.content | b64decode }}"
+            dest: "{{ mri_unit_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Reload and restart restored MRI service
+          ansible.builtin.systemd:
+            name: mri-sensor.service
+            daemon_reload: true
+            state: restarted
+
+        - name: Allow restored MRI sensor recovery
+          ansible.builtin.pause:
+            seconds: 12
+
+        - name: Verify restored MRI sensor is active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop after verified exact rollback
+          ansible.builtin.fail:
+            msg: >-
+              Muncy site-account verification failed; the exact root-run unit
+              was restored, daemon-reloaded, restarted, and verified active.

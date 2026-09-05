@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="cv-room-sensor.service"
+SYSTEMCTL="/usr/bin/systemctl"
+JOURNALCTL="/usr/bin/journalctl"
+
+usage() {
+  echo "Usage: cv-sensor-service {status|is-active|start|stop|restart|logs [--since <when>] [--lines <count>]}" >&2
+  exit 2
+}
+
+run_logs() {
+  local since="" lines="100"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since) [[ $# -ge 2 ]] || usage; since="$2"; shift 2 ;;
+      --lines) [[ $# -ge 2 ]] || usage; lines="$2"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  local cmd=("$JOURNALCTL" -u "$SERVICE_NAME" --no-pager -n "$lines")
+  [[ -z "$since" ]] || cmd+=(--since "$since")
+  exec "${cmd[@]}"
+}
+
+[[ $# -ge 1 ]] || usage
+case "$1" in
+  status) exec "$SYSTEMCTL" status "$SERVICE_NAME" --no-pager ;;
+  is-active) exec "$SYSTEMCTL" is-active "$SERVICE_NAME" ;;
+  start|stop|restart) action="$1"; exec "$SYSTEMCTL" "$action" "$SERVICE_NAME" ;;
+  logs) shift; run_logs "$@" ;;
+  *) usage ;;
+esac

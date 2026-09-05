@@ -48,13 +48,16 @@ camera_edge:
   image_width: 1920
   image_height: 1080
   upload_enabled: true
-  upload_mode: full_and_crop
+  upload_mode: cropped_only
   ocr_crop_coords:
     x: 708
     y: 520
     w: 364
     h: 182
   debug_save_images: false
+  shutter_speed: 1500
+  gain: 2.5
+  captures_per_session: 10
   calibration_mode: false
   install_cron: true
   scheduled_hours: [9, 15]

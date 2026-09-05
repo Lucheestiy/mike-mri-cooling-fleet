@@ -1,0 +1,7 @@
+---
+- name: Install narrow Restic restore verifier on backup hub
+  hosts: backup_hub
+  gather_facts: false
+  become: true
+  roles:
+    - backup_restore_test

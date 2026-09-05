@@ -1,585 +1,335 @@
 #!/usr/bin/env python3
-"""
-Scheduled production script for capturing and uploading images WITHOUT OCR processing.
-All OCR will be handled on the server side.
-Designed to run automatically via cron at scheduled times (9AM and 3PM daily).
-"""
+"""Bounded, retry-safe CoolMRI camera capture agent."""
 
-import os
-import sys
-import json
+from __future__ import annotations
+
 import base64
-import time
-import requests
-from datetime import datetime, timedelta
-from pathlib import Path
-from dotenv import load_dotenv
-import subprocess
-import tempfile
-from PIL import Image
-import numpy as np
+import fcntl
+import io
+import json
 import logging
-import pickle
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-# Set up logging
-HOME_DIR = str(Path.home())
-LOG_DIR = os.path.join(HOME_DIR, 'mri-cooling-camera', 'edge', 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, 'scheduled_capture.log')),
-        logging.StreamHandler()
+import numpy as np
+import requests
+from dotenv import load_dotenv
+from PIL import Image
+
+
+CAMERA_AGENT_VERSION = "3.0.0"
+BASE_DIR = Path(os.getenv("CAMERA_BASE_DIR", str(Path.home() / "mri-cooling-camera")))
+EDGE_DIR = BASE_DIR / "edge"
+LOG_DIR = EDGE_DIR / "logs"
+FAILED_DIR = EDGE_DIR / "failed_sessions"
+DEBUG_DIR = EDGE_DIR / "debug_captures"
+LOCK_PATH = Path("/dev/shm") / f"coolmri-camera-{os.getuid()}.lock"
+
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+FAILED_DIR.mkdir(parents=True, exist_ok=True)
+load_dotenv(EDGE_DIR / ".env")
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+SITE_ID = os.getenv("SITE_ID", "").strip()
+CAMERA_BACKEND_URL = os.getenv(
+    "CAMERA_BACKEND_URL", "https://cam.coolmri.com/api/camera/pressure"
+).strip()
+UPLOAD_ENABLED = env_bool("UPLOAD_ENABLED", True)
+UPLOAD_MODE = os.getenv("UPLOAD_MODE", "full_and_crop").strip()
+IMAGE_WIDTH = env_int("IMAGE_WIDTH", 1920, 320, 8192)
+IMAGE_HEIGHT = env_int("IMAGE_HEIGHT", 1080, 240, 8192)
+CAPTURES_PER_SESSION = env_int("CAPTURES_PER_SESSION", 10, 1, 100)
+INTER_CAPTURE_DELAY_SEC = env_int("INTER_CAPTURE_DELAY_SEC", 2, 0, 300)
+SHUTTER_SPEED = os.getenv(
+    "SHUTTER_SPEED", os.getenv("CAMERA_SHUTTER_US", "1500")
+).strip()
+GAIN = os.getenv("GAIN", os.getenv("CAMERA_GAIN", "2.5")).strip()
+DEBUG_SAVE_IMAGES = env_bool("DEBUG_SAVE_IMAGES", False)
+DEBUG_RETAIN_IMAGES = env_int("DEBUG_RETAIN_IMAGES", 20, 0, 500)
+RETRY_INTERVAL_SEC = env_int("RETRY_INTERVAL_SEC", 300, 30, 86400)
+RETRY_WINDOW_SEC = env_int("RETRY_WINDOW_SEC", 3600, 300, 604800)
+RETRY_MAX_FILES = env_int("RETRY_MAX_FILES", 20, 1, 1000)
+RETRY_MAX_BYTES = env_int("RETRY_MAX_BYTES", 134217728, 1048576, 10737418240)
+HTTP_TIMEOUT_SEC = env_int("HTTP_TIMEOUT_SEC", 180, 5, 600)
+HTTP_ATTEMPTS = env_int("HTTP_ATTEMPTS", 3, 1, 10)
+
+try:
+    CROP_COORDS = json.loads(
+        os.getenv("OCR_CROP_COORDS", '{"x":708,"y":520,"w":364,"h":182}')
+    )
+except json.JSONDecodeError as exc:
+    raise ValueError("OCR_CROP_COORDS must be valid JSON") from exc
+
+if not SITE_ID:
+    raise ValueError("SITE_ID is required")
+if UPLOAD_MODE not in {"full_and_crop", "cropped_only"}:
+    raise ValueError("UPLOAD_MODE must be full_and_crop or cropped_only")
+for key in ("x", "y", "w", "h"):
+    if not isinstance(CROP_COORDS.get(key), int):
+        raise ValueError(f"OCR_CROP_COORDS.{key} must be an integer")
+if (
+    CROP_COORDS["x"] < 0
+    or CROP_COORDS["y"] < 0
+    or CROP_COORDS["w"] <= 0
+    or CROP_COORDS["h"] <= 0
+    or CROP_COORDS["x"] + CROP_COORDS["w"] > IMAGE_WIDTH
+    or CROP_COORDS["y"] + CROP_COORDS["h"] > IMAGE_HEIGHT
+):
+    raise ValueError("OCR_CROP_COORDS is outside the configured image dimensions")
+
+logger = logging.getLogger("coolmri-camera")
+logger.setLevel(logging.INFO)
+logger.handlers.clear()
+formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+file_handler = logging.FileHandler(LOG_DIR / "camera-agent.log")
+file_handler.setFormatter(formatter)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def image_b64(image: Image.Image, quality: int) -> str:
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=quality)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def capture_command(output_path: str) -> list[str]:
+    binary = shutil.which("rpicam-still") or shutil.which("libcamera-still")
+    if not binary:
+        raise RuntimeError("Neither rpicam-still nor libcamera-still is installed")
+    return [
+        binary,
+        "--shutter", SHUTTER_SPEED,
+        "--gain", GAIN,
+        "--awb", "daylight",
+        "--denoise", "off",
+        "--width", str(IMAGE_WIDTH),
+        "--height", str(IMAGE_HEIGHT),
+        "--immediate",
+        "-n",
+        "-t", "1",
+        "-o", output_path,
     ]
-)
-logger = logging.getLogger(__name__)
 
-# Ensure logs directory exists (already created above)
 
-# Load environment variables
-load_dotenv()
-
-# Configuration from environment
-SITE_ID = os.getenv('SITE_ID', 'GMCMR2')
-CAMERA_BACKEND_URL = os.getenv('CAMERA_BACKEND_URL', 'https://cam.coolmri.com/api/camera/pressure')
-UPLOAD_ENABLED = os.getenv('UPLOAD_ENABLED', 'true').lower() == 'true'
-
-# Image dimensions from .env
-IMAGE_WIDTH = int(os.getenv('IMAGE_WIDTH', '1920'))
-IMAGE_HEIGHT = int(os.getenv('IMAGE_HEIGHT', '1080'))
-
-# OCR crop coordinates from .env
-crop_coords_str = os.getenv('OCR_CROP_COORDS', '{"x": 708, "y": 520, "w": 364, "h": 182}')
-CROP_COORDS = json.loads(crop_coords_str)
-
-# Camera settings
-SHUTTER_SPEED = os.getenv('SHUTTER_SPEED', '1500')
-GAIN = os.getenv('GAIN', '2.5')
-
-# Number of captures per session
-CAPTURES_PER_SESSION = int(os.getenv('CAPTURES_PER_SESSION', '10'))
-
-# Extended retry configuration
-EXTENDED_RETRY_INTERVAL = 300  # 5 minutes in seconds
-EXTENDED_RETRY_DURATION = 3600  # 1 hour in seconds
-FAILED_SESSIONS_DIR = os.path.join(HOME_DIR, 'mri-cooling-camera', 'edge', 'failed_sessions')
-
-# Ensure failed sessions directory exists
-os.makedirs(FAILED_SESSIONS_DIR, exist_ok=True)
-
-def capture_with_rpicam():
-    """Capture an image using rpicam-still with optimal settings."""
-    tmp_path = tempfile.mktemp(suffix='.jpg')
-
+def capture_image() -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    temp_path = ""
     try:
-        # Optimal settings for LCD display
-        cmd = [
-            'rpicam-still',
-            '--shutter', SHUTTER_SPEED,
-            '--gain', GAIN,
-            '--awb', 'daylight',
-            '--denoise', 'off',
-            '-o', tmp_path,
-            '--width', str(IMAGE_WIDTH),
-            '--height', str(IMAGE_HEIGHT),
-            '--immediate',
-            '-n',  # No preview
-            '-t', '1'  # 1ms timeout
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-
-        if result.returncode != 0:
-            logger.error(f"Camera error: {result.stderr}")
-            return None, None, None
-
-        # Read the captured image
-        img = Image.open(tmp_path)
-        img_array = np.array(img)
-
-        # Crop the OCR region
-        x, y, w, h = CROP_COORDS['x'], CROP_COORDS['y'], CROP_COORDS['w'], CROP_COORDS['h']
-        cropped = img_array[y:y+h, x:x+w]
-        cropped_img = Image.fromarray(cropped)
-
-        # Calculate basic image statistics for quality info
-        brightness = np.mean(cropped)
-        p95 = np.percentile(cropped, 95)
-        saturation = np.sum(cropped >= 255) / cropped.size * 100
-
-        return img, cropped_img, {
-            'brightness': int(brightness),
-            'p95': int(p95),
-            'saturation': round(saturation, 1)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as handle:
+            temp_path = handle.name
+        result = subprocess.run(
+            capture_command(temp_path), capture_output=True, text=True, timeout=180
+        )
+        if result.returncode:
+            raise RuntimeError(f"camera command failed: {result.stderr[-400:]}")
+        with Image.open(temp_path) as opened:
+            full = opened.convert("RGB").copy()
+        x, y, width, height = (CROP_COORDS[key] for key in ("x", "y", "w", "h"))
+        cropped = full.crop((x, y, x + width, y + height))
+        pixels = np.asarray(cropped)
+        stats = {
+            "brightness": int(np.mean(pixels)),
+            "p95": int(np.percentile(pixels, 95)),
+            "saturation": round(float(np.count_nonzero(pixels >= 255) / pixels.size * 100), 1),
         }
-
-    except Exception as e:
-        logger.error(f"Capture failed: {str(e)}")
-        return None, None, None
-
+        return full, cropped, stats
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
 
-def upload_to_website(full_img, cropped_img, site_id, timestamp):
-    """Upload images to website with robust retry logic."""
 
-    try:
-        # Convert images to base64
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_full:
-            full_img.save(tmp_full.name, format='JPEG', quality=85)
-            with open(tmp_full.name, 'rb') as f:
-                full_base64 = base64.b64encode(f.read()).decode('utf-8')
-            os.unlink(tmp_full.name)
+def build_payload(
+    full: Image.Image,
+    cropped: Image.Image,
+    capture_id: str,
+    timestamp: int,
+    stats: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "site_id": capture_id,
+        "cropped_image_base64": image_b64(cropped, 90),
+        "return_pressure": None,
+        "confidence": None,
+        "source": "camera_edge_v3",
+        "timestamp": timestamp,
+        "crop_coordinates": json.dumps(CROP_COORDS, separators=(",", ":")),
+    }
+    if UPLOAD_MODE == "full_and_crop":
+        payload["full_image_base64"] = image_b64(full, 85)
+    return payload
 
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_crop:
-            cropped_img.save(tmp_crop.name, format='JPEG', quality=90)
-            with open(tmp_crop.name, 'rb') as f:
-                cropped_base64 = base64.b64encode(f.read()).decode('utf-8')
-            os.unlink(tmp_crop.name)
 
-        # Prepare upload data (no OCR data) - CROPPED IMAGE ONLY for production
-        upload_data = {
-            'site_id': site_id,
-            'cropped_image_base64': cropped_base64,  # Only cropped image for production
-            'return_pressure': 0.0,  # Placeholder value - OCR on server
-            'confidence': 0.1,  # Low confidence indicates server-side OCR needed
-            'timestamp': timestamp,
-            'metadata': {
-                'reading_detected': 'SERVER_SIDE',  # Indicate server-side OCR needed
-                'processing': 'server_side',  # OCR will be done server-side
-                'crop_coords': CROP_COORDS,
-                'camera_settings': {
-                    'shutter': SHUTTER_SPEED,
-                    'gain': GAIN
-                },
-                'upload_version': 'crop_only_v1',
-                'session_type': 'automated_daily_crop_only',
-                'image_type': 'cropped_only'  # Indicate only cropped image sent
-            }
-        }
-
-        # Try upload with retries
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    CAMERA_BACKEND_URL,
-                    json=upload_data,
-                    timeout=180
-                )
-
-                if response.status_code in [200, 201]:  # 201 = Created (success)
-                    return True, None
-                elif response.status_code in [500, 502, 503, 504]:
-                    # Server error - retry
-                    if attempt < max_retries - 1:
-                        wait_time = 2 ** (attempt + 1)
-                        logger.warning(f"Server error {response.status_code}, retrying in {wait_time}s...")
-                        time.sleep(wait_time)
-                        continue
-                else:
-                    # Client error - don't retry
-                    return False, f"HTTP {response.status_code}"
-
-            except requests.exceptions.Timeout:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** (attempt + 1)
-                    logger.warning(f"Timeout, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** (attempt + 1)
-                    logger.warning(f"Upload error, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-                return False, str(e)[:50]
-
-        return False, "Max retries exceeded"
-
-    except Exception as e:
-        logger.error(f"Upload preparation failed: {str(e)}")
-        return False, str(e)
-
-def upload_cropped_only(cropped_img, site_id, timestamp):
-    """Upload only the cropped image to website with robust retry logic."""
-
-    try:
-        # Convert cropped image to base64
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_crop:
-            cropped_img.save(tmp_crop.name, format='JPEG', quality=90)
-            with open(tmp_crop.name, 'rb') as f:
-                cropped_base64 = base64.b64encode(f.read()).decode('utf-8')
-            os.unlink(tmp_crop.name)
-
-        # Prepare upload data (CROPPED IMAGE ONLY)
-        upload_data = {
-            'site_id': site_id,
-            'cropped_image_base64': cropped_base64,  # Only cropped image
-            'return_pressure': 0.0,  # Placeholder value - OCR on server
-            'confidence': 0.1,  # Low confidence indicates server-side OCR needed
-            'timestamp': timestamp,
-            'metadata': {
-                'reading_detected': 'SERVER_SIDE',  # Indicate server-side OCR needed
-                'processing': 'server_side',  # OCR will be done server-side
-                'crop_coords': CROP_COORDS,
-                'camera_settings': {
-                    'shutter': SHUTTER_SPEED,
-                    'gain': GAIN
-                },
-                'upload_version': 'crop_only_retry_v1',
-                'session_type': 'retry_crop_only',
-                'image_type': 'cropped_only'
-            }
-        }
-
-        # Try upload with retries
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    CAMERA_BACKEND_URL,
-                    json=upload_data,
-                    timeout=180
-                )
-
-                if response.status_code in [200, 201]:  # 201 = Created (success)
-                    return True, None
-                elif response.status_code in [500, 502, 503, 504]:
-                    # Server error - retry
-                    if attempt < max_retries - 1:
-                        wait_time = 2 ** (attempt + 1)
-                        logger.warning(f"Server error {response.status_code}, retrying in {wait_time}s...")
-                        time.sleep(wait_time)
-                        continue
-                else:
-                    # Client error - don't retry
-                    return False, f"HTTP {response.status_code}"
-
-            except requests.exceptions.Timeout:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** (attempt + 1)
-                    logger.warning(f"Timeout, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** (attempt + 1)
-                    logger.warning(f"Upload error, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-                return False, str(e)[:50]
-
-        return False, "Max retries exceeded"
-
-    except Exception as e:
-        logger.error(f"Crop-only upload preparation failed: {str(e)}")
-        return False, str(e)
-
-def save_failed_session(session_data):
-    """Save failed session data for later retry."""
-    try:
-        session_file = os.path.join(FAILED_SESSIONS_DIR, f"failed_session_{session_data['session_id']}.pkl")
-        with open(session_file, 'wb') as f:
-            pickle.dump(session_data, f)
-        logger.info(f"Failed session saved for retry: {session_file}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save session data: {str(e)}")
-        return False
-
-def load_failed_sessions():
-    """Load all failed sessions for retry."""
-    failed_sessions = []
-    try:
-        for filename in os.listdir(FAILED_SESSIONS_DIR):
-            if filename.endswith('.pkl'):
-                session_file = os.path.join(FAILED_SESSIONS_DIR, filename)
-                try:
-                    with open(session_file, 'rb') as f:
-                        session_data = pickle.load(f)
-                    failed_sessions.append((session_file, session_data))
-                except Exception as e:
-                    logger.error(f"Failed to load session file {session_file}: {str(e)}")
-    except Exception as e:
-        logger.error(f"Failed to scan failed sessions directory: {str(e)}")
-
-    return failed_sessions
-
-def retry_failed_session(session_data):
-    """Retry uploading a failed session."""
-    logger.info(f"Retrying failed session: {session_data['session_id']}")
-
-    successful_uploads = 0
-    total_captures = len(session_data['failed_captures'])
-
-    for capture_data in session_data['failed_captures']:
+def post_payload(payload: dict[str, Any]) -> tuple[bool, str | None]:
+    for attempt in range(HTTP_ATTEMPTS):
         try:
-            # Handle both old dual-image and new crop-only formats
-            if 'image_type' in capture_data and capture_data['image_type'] == 'cropped_only':
-                # New crop-only format
-                crop_img_data = base64.b64decode(capture_data['cropped_image_base64'])
+            response = requests.post(
+                CAMERA_BACKEND_URL, json=payload, timeout=HTTP_TIMEOUT_SEC
+            )
+            if response.status_code in {200, 201}:
+                return True, None
+            if response.status_code not in {500, 502, 503, 504}:
+                return False, f"HTTP {response.status_code}"
+            error = f"HTTP {response.status_code}"
+        except requests.RequestException as exc:
+            error = type(exc).__name__
+        if attempt < HTTP_ATTEMPTS - 1:
+            time.sleep(2 ** (attempt + 1))
+    return False, error
 
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_crop:
-                    tmp_crop.write(crop_img_data)
-                    cropped_img = Image.open(tmp_crop.name)
 
-                # For crop-only retry, we use a special upload function
-                success, error = upload_cropped_only(
-                    cropped_img,
-                    capture_data['site_id'],
-                    capture_data['timestamp']
-                )
+def atomic_json(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    temporary.replace(path)
 
-                # Clean up temp file
-                os.unlink(tmp_crop.name)
 
-            else:
-                # Legacy dual-image format (for backward compatibility)
-                full_img_data = base64.b64decode(capture_data['full_image_base64'])
-                crop_img_data = base64.b64decode(capture_data['cropped_image_base64'])
+def enforce_failed_limit() -> None:
+    files = sorted(FAILED_DIR.glob("capture-*.json"), key=lambda path: path.stat().st_mtime)
+    total_bytes = sum(path.stat().st_size for path in files)
+    while files and (len(files) > RETRY_MAX_FILES or total_bytes > RETRY_MAX_BYTES):
+        path = files.pop(0)
+        size = path.stat().st_size
+        logger.error(
+            "Dropping oldest retry record to enforce queue bounds: %s (%s bytes)",
+            path.name,
+            size,
+        )
+        path.unlink(missing_ok=True)
+        total_bytes -= size
 
-                # Save to temporary files and reload as PIL Images
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_full:
-                    tmp_full.write(full_img_data)
-                    full_img = Image.open(tmp_full.name)
 
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_crop:
-                    tmp_crop.write(crop_img_data)
-                    cropped_img = Image.open(tmp_crop.name)
+def save_failed_payload(payload: dict[str, Any], error: str) -> None:
+    now = utc_now()
+    record = {
+        "version": 1,
+        "created_at": now.isoformat(),
+        "last_attempt_at": now.isoformat(),
+        "attempts": 1,
+        "last_error": error,
+        "payload": payload,
+    }
+    path = FAILED_DIR / f"capture-{now.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+    atomic_json(path, record)
+    enforce_failed_limit()
 
-                # Retry upload with both images
-                success, error = upload_to_website(
-                    full_img,
-                    cropped_img,
-                    capture_data['site_id'],
-                    capture_data['timestamp']
-                )
 
-                # Clean up temp files
-                os.unlink(tmp_full.name)
-                os.unlink(tmp_crop.name)
-
-            if success:
-                successful_uploads += 1
-                logger.info(f"Retry successful: {capture_data['site_id']}")
-            else:
-                logger.error(f"Retry failed: {capture_data['site_id']} - {error}")
-
-        except Exception as e:
-            logger.error(f"Error during retry of {capture_data['site_id']}: {str(e)}")
-
-    success_rate = successful_uploads / total_captures if total_captures > 0 else 0
-    logger.info(f"Retry session results: {successful_uploads}/{total_captures} uploads ({success_rate*100:.1f}%)")
-
-    return successful_uploads, total_captures
-
-def process_extended_retries():
-    """Process any failed sessions that need extended retries."""
+def process_failed_sessions(now: datetime | None = None) -> tuple[int, int]:
     if not UPLOAD_ENABLED:
-        logger.info("Upload disabled; skipping failed session retries")
-        return
-
-    logger.info("Checking for failed sessions to retry...")
-
-    failed_sessions = load_failed_sessions()
-    if not failed_sessions:
-        logger.info("No failed sessions found for retry")
-        return
-
-    current_time = datetime.now()
-    sessions_retried = 0
-
-    for session_file, session_data in failed_sessions:
+        return 0, 0
+    now = now or utc_now()
+    recovered = attempted = 0
+    for path in sorted(FAILED_DIR.glob("capture-*.json")):
         try:
-            # Check if session is within retry window (1 hour from failure)
-            failure_time = datetime.fromisoformat(session_data['failure_time'])
-            time_since_failure = (current_time - failure_time).total_seconds()
-
-            if time_since_failure > EXTENDED_RETRY_DURATION:
-                # Session too old, remove it
-                logger.info(f"Removing expired failed session: {session_data['session_id']}")
-                os.remove(session_file)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            created = datetime.fromisoformat(record["created_at"])
+            last_attempt = datetime.fromisoformat(record["last_attempt_at"])
+            if (now - created).total_seconds() > RETRY_WINDOW_SEC:
+                logger.error("Retry window expired; preserving record for operator review: %s", path.name)
                 continue
+            if (now - last_attempt).total_seconds() < RETRY_INTERVAL_SEC:
+                continue
+            attempted += 1
+            success, error = post_payload(record["payload"])
+            if success:
+                recovered += 1
+                path.unlink(missing_ok=True)
+            else:
+                record["attempts"] = int(record.get("attempts", 0)) + 1
+                record["last_attempt_at"] = now.isoformat()
+                record["last_error"] = error
+                atomic_json(path, record)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            logger.error("Invalid retry record %s: %s", path.name, exc)
+    return recovered, attempted
 
-            # Check if enough time has passed since last retry (5 minutes)
-            last_retry = datetime.fromisoformat(session_data.get('last_retry_time', session_data['failure_time']))
-            time_since_retry = (current_time - last_retry).total_seconds()
 
-            if time_since_retry >= EXTENDED_RETRY_INTERVAL:
-                logger.info(f"Retrying session {session_data['session_id']} (failed {time_since_failure/60:.1f} min ago)")
+def retain_debug_image(image: Image.Image, capture_id: str) -> None:
+    if not DEBUG_SAVE_IMAGES or DEBUG_RETAIN_IMAGES == 0:
+        return
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    image.save(DEBUG_DIR / f"{capture_id}.jpg", format="JPEG", quality=85)
+    files = sorted(DEBUG_DIR.glob("*.jpg"), key=lambda path: path.stat().st_mtime)
+    for path in files[:-DEBUG_RETAIN_IMAGES]:
+        path.unlink(missing_ok=True)
 
-                # Update last retry time
-                session_data['last_retry_time'] = current_time.isoformat()
-                session_data['retry_count'] = session_data.get('retry_count', 0) + 1
 
-                # Attempt retry
-                successful_uploads, total_captures = retry_failed_session(session_data)
-
-                if successful_uploads == total_captures:
-                    # Full success - remove the failed session file
-                    logger.info(f"Session {session_data['session_id']} fully recovered - removing from retry queue")
-                    os.remove(session_file)
-                elif successful_uploads > 0:
-                    # Partial success - update session data to only include remaining failures
-                    logger.info(f"Session {session_data['session_id']} partially recovered ({successful_uploads}/{total_captures})")
-                    # For simplicity, we'll remove partial successes and let the remaining failures be retried next time
-                    # In a more complex implementation, we could track individual capture failures
+def run_scheduled_session() -> tuple[int, int]:
+    captured = uploaded = 0
+    session_id = utc_now().strftime("%Y%m%dT%H%M%SZ")
+    for index in range(1, CAPTURES_PER_SESSION + 1):
+        capture_id = f"{SITE_ID}_SCHED_{session_id}_{index:02d}"
+        try:
+            full, cropped, stats = capture_image()
+            captured += 1
+            retain_debug_image(cropped, capture_id)
+            if UPLOAD_ENABLED:
+                payload = build_payload(full, cropped, capture_id, int(time.time()), stats)
+                success, error = post_payload(payload)
+                if success:
+                    uploaded += 1
                 else:
-                    # No success - save updated retry info
-                    with open(session_file, 'wb') as f:
-                        pickle.dump(session_data, f)
-                    logger.warning(f"Session {session_data['session_id']} retry failed - will try again in 5 minutes")
+                    logger.error("Upload failed for %s: %s", capture_id, error)
+                    save_failed_payload(payload, error or "unknown")
+            logger.info("capture=%s quality=%s", capture_id, stats)
+        except Exception as exc:
+            logger.exception("Capture failed for %s: %s", capture_id, exc)
+        if index < CAPTURES_PER_SESSION and INTER_CAPTURE_DELAY_SEC:
+            time.sleep(INTER_CAPTURE_DELAY_SEC)
+    return captured, uploaded
 
-                sessions_retried += 1
 
-        except Exception as e:
-            logger.error(f"Error processing failed session {session_file}: {str(e)}")
+def successful_session(captured: int, uploaded: int) -> bool:
+    required = math.ceil(CAPTURES_PER_SESSION * 0.9)
+    if captured < required:
+        return False
+    return not UPLOAD_ENABLED or uploaded >= required
 
-    if sessions_retried > 0:
-        logger.info(f"Processed {sessions_retried} failed session retries")
 
-def run_scheduled_session():
-    """Run a scheduled capture session."""
-    session_start = datetime.now()
-    logger.info(f"Starting scheduled capture session at {session_start.strftime('%Y-%m-%d %H:%M:%S')}")
+def main() -> int:
+    with LOCK_PATH.open("w", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.error("Another camera capture or retry process is active")
+            return 75
+        recovered, attempted = process_failed_sessions()
+        logger.info("version=%s retry_recovered=%s retry_attempted=%s", CAMERA_AGENT_VERSION, recovered, attempted)
+        captured, uploaded = run_scheduled_session()
+        logger.info("captured=%s uploaded=%s requested=%s", captured, uploaded, CAPTURES_PER_SESSION)
+        return 0 if successful_session(captured, uploaded) else 1
 
-    # Generate session ID
-    session_id = session_start.strftime("%m%d_%H%M%S")
-
-    # Track results
-    successful_captures = 0
-    successful_uploads = 0
-    failed_captures = []
-
-    # Run captures
-    for i in range(1, CAPTURES_PER_SESSION + 1):
-        logger.info(f"Capture {i}/{CAPTURES_PER_SESSION}")
-
-        # Capture image
-        full_img, cropped_img, stats = capture_with_rpicam()
-
-        if full_img is None:
-            logger.error(f"Capture {i} failed")
-            continue
-
-        successful_captures += 1
-
-        # Generate site ID
-        site_id = f"{SITE_ID}_SCHED_{session_id}_{i:02d}"
-        timestamp = int(time.time())
-
-        if not UPLOAD_ENABLED:
-            logger.info(f"Upload disabled; captured {site_id} without submitting")
-            if stats:
-                logger.info(f"Quality - Sat: {stats['saturation']}%, Bright: {stats['brightness']}, P95: {stats['p95']}")
-            continue
-
-        # Upload to website (CROPPED IMAGE ONLY)
-        success, error = upload_cropped_only(cropped_img, site_id, timestamp)
-
-        if success:
-            successful_uploads += 1
-            logger.info(f"Capture {i} uploaded successfully: {site_id}")
-            if stats:
-                logger.info(f"Quality - Sat: {stats['saturation']}%, Bright: {stats['brightness']}, P95: {stats['p95']}")
-        else:
-            logger.error(f"Upload {i} failed: {error}")
-
-            # Store failed capture for later retry (CROPPED IMAGE ONLY)
-            try:
-                # Convert only cropped image to base64 for storage
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_crop:
-                    cropped_img.save(tmp_crop.name, format='JPEG', quality=90)
-                    with open(tmp_crop.name, 'rb') as f:
-                        crop_base64 = base64.b64encode(f.read()).decode('utf-8')
-                    os.unlink(tmp_crop.name)
-
-                failed_capture = {
-                    'site_id': site_id,
-                    'timestamp': timestamp,
-                    'cropped_image_base64': crop_base64,  # Only cropped image stored
-                    'error': error,
-                    'stats': stats,
-                    'image_type': 'cropped_only'
-                }
-                failed_captures.append(failed_capture)
-
-            except Exception as e:
-                logger.error(f"Failed to store capture {i} for retry: {str(e)}")
-
-        # Small delay between captures (except last one)
-        if i < CAPTURES_PER_SESSION:
-            time.sleep(2)
-
-    # Save failed captures for extended retry if needed
-    if failed_captures:
-        session_data = {
-            'session_id': session_id,
-            'failure_time': session_start.isoformat(),
-            'failed_captures': failed_captures,
-            'total_captures': successful_captures,
-            'retry_count': 0
-        }
-        save_failed_session(session_data)
-
-    # Log session summary
-    session_end = datetime.now()
-    duration = (session_end - session_start).total_seconds()
-
-    logger.info(f"Session completed in {duration:.1f}s")
-    logger.info(f"Results: {successful_captures}/{CAPTURES_PER_SESSION} captures, {successful_uploads}/{CAPTURES_PER_SESSION} uploads")
-
-    if not UPLOAD_ENABLED and successful_captures > 0:
-        logger.info("Capture-only bench session successful; uploads disabled")
-    elif successful_uploads >= CAPTURES_PER_SESSION * 0.9:  # 90%+ success
-        logger.info("✅ Session successful!")
-    elif successful_uploads > 0:
-        logger.warning(f"⚠️  Partial success: {successful_uploads}/{CAPTURES_PER_SESSION} uploads")
-    else:
-        logger.error("❌ Session failed - no successful uploads")
-
-    return successful_captures, successful_uploads
-
-def main():
-    """Main entry point for scheduled execution."""
-    try:
-        logger.info("=" * 60)
-        logger.info("🕘 SCHEDULED CAPTURE SESSION STARTING")
-        logger.info("=" * 60)
-        logger.info(f"Configuration:")
-        logger.info(f"  - Site ID: {SITE_ID}")
-        logger.info(f"  - Upload enabled: {UPLOAD_ENABLED}")
-        logger.info(f"  - Captures per session: {CAPTURES_PER_SESSION}")
-        logger.info(f"  - Camera settings: {SHUTTER_SPEED}μs shutter, {GAIN} gain")
-        logger.info(f"  - Server-side OCR processing")
-        logger.info(f"  - CROPPED IMAGES ONLY (364x182 pixels)")
-        logger.info(f"  - Extended retry: Every 5 min for 1 hour on failure")
-        logger.info("")
-
-        # First, process any existing failed sessions
-        process_extended_retries()
-
-        # Then run the new scheduled session
-        captures, uploads = run_scheduled_session()
-
-        logger.info("=" * 60)
-        logger.info("🏁 SCHEDULED CAPTURE SESSION COMPLETE")
-        logger.info("=" * 60)
-
-        # Exit with appropriate code
-        if not UPLOAD_ENABLED:
-            sys.exit(0 if captures > 0 else 1)
-        elif uploads >= captures * 0.9:  # 90%+ upload success
-            sys.exit(0)
-        else:
-            sys.exit(1)  # Indicate failure for monitoring
-
-    except Exception as e:
-        logger.error(f"Fatal error in scheduled session: {str(e)}")
-        sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

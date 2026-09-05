@@ -1,0 +1,62 @@
+---
+- name: Roll back the MR3 Eaton fleet repair
+  hosts: agcmr3
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    ansible_become_exe: /home/agcmr3/.local/bin/sudo-rs-ansible-compat
+    eaton_spd_rollback_confirm: false
+
+  tasks:
+    - name: Require explicit rollback confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or eaton_spd_rollback_confirm | bool
+        fail_msg: Run check mode first, then set eaton_spd_rollback_confirm=true.
+
+    - name: Stop the fleet-managed uploader
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - agcmr3
+          - --
+          - env
+          - XDG_RUNTIME_DIR=/run/user/1000
+          - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+          - systemctl
+          - --user
+          - stop
+          - surge-monitor.service
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Remove the fleet Netplan override
+      ansible.builtin.file:
+        path: /etc/netplan/95-coolmri-eaton-eth0.yaml
+        state: absent
+
+    - name: Regenerate and reload the prior Ethernet profile
+      ansible.builtin.shell: |
+        set -eu
+        netplan generate
+        nmcli connection reload
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Restore the legacy static-address helper
+      ansible.builtin.systemd_service:
+        name: eth0-spd-ip.service
+        state: restarted
+        enabled: true
+      when: not ansible_check_mode
+
+    - name: Restore the legacy local poller
+      ansible.builtin.systemd_service:
+        name: spd-poller.service
+        state: started
+        enabled: true
+      when: not ansible_check_mode

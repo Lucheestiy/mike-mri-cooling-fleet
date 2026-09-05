@@ -1,0 +1,67 @@
+- name: Validate edge baseline settings
+  ansible.builtin.assert:
+    that:
+      - edge_baseline.journal_storage in ['persistent', 'volatile', 'auto']
+      - edge_baseline_journal_policy_state in ['present', 'absent']
+    fail_msg: "edge_baseline.journal_storage must be persistent, volatile, or auto"
+
+- name: Set fleet timezone
+  community.general.timezone:
+    name: "{{ edge_baseline.timezone }}"
+  when: edge_baseline_manage_timezone | bool
+
+- name: Ensure systemd time synchronization is enabled
+  ansible.builtin.systemd:
+    name: systemd-timesyncd.service
+    enabled: true
+    state: started
+  when: edge_baseline_manage_time_sync | bool
+
+- name: Ensure journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install bounded fleet journal policy
+  ansible.builtin.template:
+    src: 60-coolmri-fleet.conf.j2
+    dest: /etc/systemd/journald.conf.d/60-coolmri-fleet.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart systemd-journald
+  when: edge_baseline_journal_policy_state == 'present'
+
+- name: Remove fleet journal policy during rollback
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d/60-coolmri-fleet.conf
+    state: absent
+  notify: Restart systemd-journald
+  when: edge_baseline_journal_policy_state == 'absent'
+
+- name: Flush handlers before verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify effective journal configuration
+  ansible.builtin.command: systemd-analyze cat-config systemd/journald.conf
+  register: edge_journal_config
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert fleet journal drop-in is active
+  ansible.builtin.assert:
+    that:
+      - "'60-coolmri-fleet.conf' in edge_journal_config.stdout"
+      - "('Storage=' ~ edge_baseline.journal_storage) in edge_journal_config.stdout"
+  when: edge_baseline_journal_policy_state == 'present'
+        and not ansible_check_mode
+
+- name: Assert fleet journal drop-in is removed
+  ansible.builtin.assert:
+    that:
+      - "'60-coolmri-fleet.conf' not in edge_journal_config.stdout"
+  when: edge_baseline_journal_policy_state == 'absent'
+        and not ansible_check_mode

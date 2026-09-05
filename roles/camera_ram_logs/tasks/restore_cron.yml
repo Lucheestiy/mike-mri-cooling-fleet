@@ -1,0 +1,12 @@
+---
+- name: Restore the exact pre-transition crontab
+  ansible.builtin.command:
+    argv: [crontab, -u, "{{ mri_user }}", "{{ camera_ram_logs_crontab_state }}"]
+  when: not ansible_check_mode
+  changed_when: true
+
+- name: Remove recovered crontab state
+  ansible.builtin.file:
+    path: "{{ camera_ram_logs_crontab_state }}"
+    state: absent
+  when: not ansible_check_mode

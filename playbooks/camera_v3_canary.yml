@@ -1,0 +1,109 @@
+---
+- name: Run one upload-disabled camera v3 hardware canary on nearby AGC MR3
+  hosts: agcmr3
+  gather_facts: false
+  become: false
+  vars:
+    camera_canary_base: /dev/shm/coolmri-camera-v3-canary
+    camera_canary_lock: /dev/shm/coolmri-camera-1000.lock
+    camera_canary_source: "{{ playbook_dir }}/../roles/camera_edge/files/edge/scheduled_capture.py"
+
+  tasks:
+    - name: Require explicit canary confirmation
+      ansible.builtin.assert:
+        that:
+          - camera_v3_canary_confirm | default(false) | bool
+          - inventory_hostname == "agcmr3"
+        fail_msg: Set camera_v3_canary_confirm=true; this canary is hard-limited to AGC MR3.
+
+    - name: Verify existing camera virtual environment
+      ansible.builtin.stat:
+        path: /home/agcmr3/mri-cooling-camera/venv/bin/python3
+      register: camera_canary_python
+
+    - name: Require existing camera Python
+      ansible.builtin.assert:
+        that:
+          - camera_canary_python.stat.executable | default(false)
+
+    - name: Check for active production camera work
+      ansible.builtin.shell: >-
+        pgrep -af '[s]cheduled_capture|[r]etry_failed|[r]picam-still|[l]ibcamera-still' || true
+      args:
+        executable: /bin/bash
+      register: camera_canary_processes
+      changed_when: false
+
+    - name: Refuse to contend with production camera work
+      ansible.builtin.assert:
+        that:
+          - camera_canary_processes.stdout | trim | length == 0
+        fail_msg: "Camera process already active: {{ camera_canary_processes.stdout }}"
+
+    - name: Record production runtime hashes
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - /home/agcmr3/mri-cooling-camera/edge/scheduled_capture.py
+          - /home/agcmr3/mri-cooling-camera/edge/retry_failed_sessions.py
+          - /home/agcmr3/mri-cooling-camera/edge/run_scheduled_capture.sh
+          - /home/agcmr3/mri-cooling-camera/edge/run_retry_check.sh
+      register: camera_production_hashes_before
+      changed_when: false
+
+    - name: Execute one RAM-only upload-disabled capture
+      block:
+        - name: Run canonical source from standard input
+          ansible.builtin.command:
+            argv:
+              - /home/agcmr3/mri-cooling-camera/venv/bin/python3
+              - "-"
+            stdin: "{{ lookup('ansible.builtin.file', camera_canary_source) }}"
+          environment:
+            PYTHONDONTWRITEBYTECODE: "1"
+            CAMERA_BASE_DIR: "{{ camera_canary_base }}"
+            SITE_ID: AGCMR3
+            UPLOAD_ENABLED: "false"
+            UPLOAD_MODE: cropped_only
+            IMAGE_WIDTH: "1920"
+            IMAGE_HEIGHT: "1080"
+            OCR_CROP_COORDS: '{"x":708,"y":520,"w":364,"h":182}'
+            SHUTTER_SPEED: "1000"
+            GAIN: "0.5"
+            CAPTURES_PER_SESSION: "1"
+            INTER_CAPTURE_DELAY_SEC: "0"
+            DEBUG_SAVE_IMAGES: "false"
+          register: camera_canary_result
+
+        - name: Verify successful capture evidence
+          ansible.builtin.assert:
+            that:
+              - camera_canary_result.rc == 0
+              - "'captured=1 uploaded=0 requested=1' in camera_canary_result.stderr"
+
+      always:
+        - name: Remove canary RAM workspace
+          ansible.builtin.file:
+            path: "{{ camera_canary_base }}"
+            state: absent
+
+        - name: Remove canary RAM lock
+          ansible.builtin.file:
+            path: "{{ camera_canary_lock }}"
+            state: absent
+
+    - name: Re-read production runtime hashes
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - /home/agcmr3/mri-cooling-camera/edge/scheduled_capture.py
+          - /home/agcmr3/mri-cooling-camera/edge/retry_failed_sessions.py
+          - /home/agcmr3/mri-cooling-camera/edge/run_scheduled_capture.sh
+          - /home/agcmr3/mri-cooling-camera/edge/run_retry_check.sh
+      register: camera_production_hashes_after
+      changed_when: false
+
+    - name: Prove production camera files were untouched
+      ansible.builtin.assert:
+        that:
+          - camera_production_hashes_after.stdout == camera_production_hashes_before.stdout

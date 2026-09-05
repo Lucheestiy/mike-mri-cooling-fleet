@@ -1,0 +1,21 @@
+[Unit]
+Description=Refresh CoolMRI Raspberry Pi fleet health report
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mlweb
+Group=mlweb
+WorkingDirectory=/home/mlweb/mri-cooling-pi-fleet
+ExecStart=/home/mlweb/mri-cooling-pi-fleet/.venv/bin/python /home/mlweb/mri-cooling-pi-fleet/scripts/fleet_ops.py audit --no-bootstrap --connect-timeout 3 --command-timeout 60
+ExecStartPost=+/home/mlweb/mri-cooling-pi-fleet/.venv/bin/python /home/mlweb/mri-cooling-pi-fleet/scripts/backup_coverage.py
+ExecStartPost=/home/mlweb/mri-cooling-pi-fleet/.venv/bin/python /home/mlweb/mri-cooling-pi-fleet/scripts/optimization_observation.py
+ExecStartPost=/home/mlweb/mri-cooling-pi-fleet/.venv/bin/python /home/mlweb/mri-cooling-pi-fleet/scripts/fleet_last_known.py
+ExecStartPost=-/home/mlweb/mri-cooling-pi-fleet/.venv/bin/python /home/mlweb/mri-cooling-pi-fleet/scripts/os_upgrade_recovery_watch.py --host agcmr2 --baseline /home/mlweb/mri-cooling-pi-fleet/reports/os_upgrade_readiness_20260717_112357_117411.json
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

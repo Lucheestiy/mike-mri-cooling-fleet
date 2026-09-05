@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE=/mnt/t7backup/restic-pi-repos
+TARGETS=/etc/restic-pi-backup-targets.psv
+STATUS_DIR=/var/lib/coolmri-fleet/backup-status
+
+export HOME=/root
+export XDG_CACHE_HOME=/root/.cache
+export RESTIC_CACHE_DIR=/root/.cache/restic
+export RESTIC_PASSWORD_FILE=/root/.config/restic-backup/password
+
+test -r "$TARGETS"
+test -s "$RESTIC_PASSWORD_FILE"
+mkdir -p "$STATUS_DIR"
+chmod 0755 "$STATUS_DIR"
+
+while IFS="|" read -r id _user _ip _label _reported_host; do
+  [[ -n "${id:-}" ]] || continue
+  [[ "$id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+    echo "Invalid backup target ID: $id" >&2
+    exit 1
+  }
+  repo="$BASE/$id"
+  [[ -d "$repo" ]] || continue
+  latest_snapshot=$(restic -r "$repo" snapshots --host "$id" --tag pi-pull --json \
+    | jq -c 'sort_by(.time) | last // empty')
+  [[ -n "$latest_snapshot" ]] || continue
+  snapshot_id=$(jq -r '.id' <<<"$latest_snapshot")
+  snapshot_time=$(jq -r '.time' <<<"$latest_snapshot")
+  status_tmp=$(mktemp "$STATUS_DIR/.${id}.XXXXXX")
+  jq -n \
+    --arg repository "$id" \
+    --arg snapshot_id "$snapshot_id" \
+    --arg snapshot_time "$snapshot_time" \
+    --arg completed_at "$snapshot_time" \
+    '{repository: $repository, status: "success", snapshot_id: $snapshot_id,
+      snapshot_time: $snapshot_time, completed_at: $completed_at}' >"$status_tmp"
+  chmod 0644 "$status_tmp"
+  mv -f "$status_tmp" "$STATUS_DIR/$id.json"
+done <"$TARGETS"

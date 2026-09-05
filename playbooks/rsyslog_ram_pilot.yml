@@ -1,0 +1,302 @@
+---
+- name: Stop duplicate persistent rsyslog writes on one nearby profile canary
+  hosts: gmcir3:agcmr1
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    rsyslog_ram_pilot_confirm: false
+    rsyslog_pilot_profiles:
+      gmcir3:
+        profile: cv
+        program: /opt/cv-room-monitor/src/cv_room_sensor.py
+        program_sha256: a7bb0bc02e548f37993345e54cd664ac4d6e3dc47ba0b5525d7402f3a07717aa
+        service: cv-room-sensor.service
+        telemetry_url: https://cv.coolmri.com/api/sites/snapshot
+        site_id: IR3
+        required_fields: [helium_in, helium_out, primary_in, primary_out]
+        expected_probes: 4
+      agcmr1:
+        profile: mri
+        program: /home/agcmr1/mike-mri-cooling/src/pi_sensor.py
+        program_sha256: 0d939f88b35ab8167ce1e70d91a8611a14f4a6a9631a30677bbe06bb5234a36f
+        service: mri-sensor.service
+        telemetry_url: https://coolmri.com/api/sites/snapshot
+        site_id: AGCMR1
+        required_fields: [helium_in, helium_out, primary_in, primary_out]
+        expected_probes: 5
+    rsyslog_pilot_profile: "{{ rsyslog_pilot_profiles[inventory_hostname] }}"
+    rsyslog_pilot_program: "{{ rsyslog_pilot_profile.program }}"
+    rsyslog_pilot_program_sha256: "{{ rsyslog_pilot_profile.program_sha256 }}"
+    rsyslog_pilot_telemetry_url: "{{ rsyslog_pilot_profile.telemetry_url }}"
+    rsyslog_pilot_site_id: "{{ rsyslog_pilot_profile.site_id }}"
+    rsyslog_pilot_required_fields: "{{ rsyslog_pilot_profile.required_fields }}"
+    rsyslog_pilot_expected_probes: "{{ rsyslog_pilot_profile.expected_probes }}"
+    rsyslog_pilot_state_path: /var/lib/coolmri/rsyslog-ram-pilot-before.json
+    rsyslog_pilot_evidence_dir: /var/lib/coolmri-fleet
+    rsyslog_pilot_evidence_path: /var/lib/coolmri-fleet/rsyslog-ram-pilot.json
+
+  pre_tasks:
+    - name: Require explicit one-host canary confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or rsyslog_ram_pilot_confirm | bool
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname in rsyslog_pilot_profiles
+        fail_msg: >-
+          This pilot permits exactly one backed nearby canary. Run --check first,
+          then pass -e rsyslog_ram_pilot_confirm=true with an explicit one-host limit.
+
+    - name: Load controller backup evidence
+      ansible.builtin.set_fact:
+        rsyslog_pilot_backup: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select canary backup activity
+      ansible.builtin.set_fact:
+        rsyslog_pilot_backup_status: >-
+          {{ rsyslog_pilot_backup.repository_status
+             | selectattr('repository', 'equalto', inventory_hostname)
+             | first | default({}) }}
+
+    - name: Enforce recent successful backup
+      ansible.builtin.assert:
+        that:
+          - rsyslog_pilot_backup.batch.result == 'success'
+          - rsyslog_pilot_backup.batch.timer_active | bool
+          - rsyslog_pilot_backup_status.activity_recent | default(false) | bool
+
+    - name: Require package manager to be idle
+      ansible.builtin.shell: >-
+        if systemctl is-active --quiet apt-daily-upgrade.service
+        || systemctl is-active --quiet apt-daily.service
+        || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null
+        || pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade$' >/dev/null;
+        then exit 1; fi
+      changed_when: false
+      check_mode: false
+
+    - name: Require writable boot storage, safe nearby Wi-Fi, and idle camera
+      ansible.builtin.shell: |
+        set -o pipefail
+        findmnt -n -o OPTIONS /boot/firmware | tr ',' '\n' | grep -qx rw
+        interface="$(ip route show default | awk 'NR == 1 {for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+        if [ -n "$interface" ] && [ -d "/sys/class/net/$interface/wireless" ]; then
+          signal="$(iw dev "$interface" link | awk '/signal:/ {print int($2); exit}')"
+          test -n "$signal"
+          test "$signal" -gt -75
+        fi
+        ! pgrep -af '[s]cheduled_capture|[r]etry_failed|[r]picam-still|[l]ibcamera-still' >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Capture exact rsyslog state
+      ansible.builtin.shell: >-
+        printf '{"active":"%s","enabled":"%s"}\n'
+        "$(systemctl is-active rsyslog.service || true)"
+        "$(systemctl is-enabled rsyslog.service || true)"
+      args:
+        executable: /bin/bash
+      register: rsyslog_pilot_state_raw
+      changed_when: false
+      check_mode: false
+
+    - name: Parse exact rsyslog state
+      ansible.builtin.set_fact:
+        rsyslog_pilot_state: "{{ rsyslog_pilot_state_raw.stdout | from_json }}"
+
+    - name: Require active duplicate writer for first pilot
+      ansible.builtin.assert:
+        that:
+          - rsyslog_pilot_state.active == 'active'
+          - rsyslog_pilot_state.enabled == 'enabled'
+
+    - name: Require active bounded volatile journald sink
+      ansible.builtin.command: systemd-analyze cat-config systemd/journald.conf
+      register: rsyslog_pilot_journal_config
+      changed_when: false
+      check_mode: false
+
+    - name: Prove RAM journal is available before stopping rsyslog
+      ansible.builtin.assert:
+        that:
+          - "'Storage=volatile' in rsyslog_pilot_journal_config.stdout"
+          - "'RuntimeMaxUse=32M' in rsyslog_pilot_journal_config.stdout"
+
+    - name: Capture approved profile application checksum
+      ansible.builtin.stat:
+        path: "{{ rsyslog_pilot_program }}"
+        checksum_algorithm: sha256
+      register: rsyslog_pilot_program_before
+
+    - name: Require approved profile application
+      ansible.builtin.assert:
+        that:
+          - rsyslog_pilot_program_before.stat.checksum == rsyslog_pilot_program_sha256
+
+    - name: Require active non-root profile service
+      ansible.builtin.shell: >-
+        test "$(systemctl is-active {{ rsyslog_pilot_profile.service }})" = active
+        && test "$(systemctl show {{ rsyslog_pilot_profile.service }} -p User --value)" = "{{ ansible_user }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Require exact probes and zero throttle flags
+      ansible.builtin.shell: >-
+        test "$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l)" -eq {{ rsyslog_pilot_expected_probes }}
+        && test "$(vcgencmd get_throttled)" = throttled=0x0
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Capture live profile telemetry before pilot
+      ansible.builtin.uri:
+        url: "{{ rsyslog_pilot_telemetry_url }}"
+        return_content: true
+        timeout: 15
+      register: rsyslog_pilot_telemetry_before_response
+      delegate_to: localhost
+      become: false
+      check_mode: false
+
+    - name: Select canary telemetry before pilot
+      ansible.builtin.set_fact:
+        rsyslog_pilot_telemetry_before: >-
+          {{ rsyslog_pilot_telemetry_before_response.json
+             | selectattr('id', 'equalto', rsyslog_pilot_site_id)
+             | first | default({}) }}
+
+    - name: Require complete live pre-pilot telemetry
+      ansible.builtin.assert:
+        that:
+          - rsyslog_pilot_telemetry_before.id | default('') == rsyslog_pilot_site_id
+          - not (rsyslog_pilot_telemetry_before.is_offline | default(true) | bool)
+          - rsyslog_pilot_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Disable duplicate persistent rsyslog with automatic rollback
+      when: not ansible_check_mode
+      block:
+        - name: Preserve exact pre-pilot state
+          ansible.builtin.copy:
+            dest: "{{ rsyslog_pilot_state_path }}"
+            owner: root
+            group: root
+            mode: "0600"
+            content: "{{ rsyslog_pilot_state | to_nice_json }}"
+
+        - name: Capture exact rollback-state timestamp
+          ansible.builtin.stat:
+            path: "{{ rsyslog_pilot_state_path }}"
+          register: rsyslog_pilot_saved_state
+
+        - name: Stop and disable rsyslog
+          ansible.builtin.systemd_service:
+            name: rsyslog.service
+            state: stopped
+            enabled: false
+
+        - name: Allow sensor and telemetry cycles
+          ansible.builtin.pause:
+            seconds: 20
+
+        - name: Prove journald active and rsyslog inactive
+          ansible.builtin.shell: >-
+            test "$(systemctl is-active systemd-journald.service)" = active
+            && test "$(systemctl is-active rsyslog.service || true)" = inactive
+            && test "$(systemctl is-enabled rsyslog.service || true)" = disabled
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Prove profile application checksum remained unchanged
+          ansible.builtin.stat:
+            path: "{{ rsyslog_pilot_program }}"
+            checksum_algorithm: sha256
+          register: rsyslog_pilot_program_after
+
+        - name: Recheck profile service probes and throttle flags
+          ansible.builtin.shell: >-
+            test "$(systemctl is-active {{ rsyslog_pilot_profile.service }})" = active
+            && test "$(systemctl show {{ rsyslog_pilot_profile.service }} -p User --value)" = "{{ ansible_user }}"
+            && test "$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l)" -eq {{ rsyslog_pilot_expected_probes }}
+            && test "$(vcgencmd get_throttled)" = throttled=0x0
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Wait for mapped profile telemetry to advance
+          ansible.builtin.uri:
+            url: "{{ rsyslog_pilot_telemetry_url }}"
+            return_content: true
+            timeout: 15
+          register: rsyslog_pilot_telemetry_after_response
+          until: >-
+            ((rsyslog_pilot_telemetry_after_response.json
+              | selectattr('id', 'equalto', rsyslog_pilot_site_id)
+              | first | default({})).last_updated | default(0) | int)
+            > (rsyslog_pilot_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 5
+          delegate_to: localhost
+          become: false
+
+        - name: Select advanced canary telemetry
+          ansible.builtin.set_fact:
+            rsyslog_pilot_telemetry_after: >-
+              {{ rsyslog_pilot_telemetry_after_response.json
+                 | selectattr('id', 'equalto', rsyslog_pilot_site_id)
+                 | first | default({}) }}
+
+        - name: Prove unchanged program and complete mapped readings
+          ansible.builtin.assert:
+            that:
+              - rsyslog_pilot_program_after.stat.checksum == rsyslog_pilot_program_before.stat.checksum
+              - rsyslog_pilot_telemetry_after[item] is number
+          loop: "{{ rsyslog_pilot_required_fields }}"
+
+        - name: Create public sanitized pilot-evidence directory
+          ansible.builtin.file:
+            path: "{{ rsyslog_pilot_evidence_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Publish sanitized pilot boundary without rollback state
+          ansible.builtin.copy:
+            dest: "{{ rsyslog_pilot_evidence_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+            content: >-
+              {{ {
+                   'kind': 'rsyslog_ram_pilot',
+                   'inventory_name': inventory_hostname,
+                   'profile': rsyslog_pilot_profile.profile,
+                   'applied_epoch': rsyslog_pilot_saved_state.stat.mtime | int
+                 } | to_nice_json }}
+
+      rescue:
+        - name: Remove incomplete public pilot marker
+          ansible.builtin.file:
+            path: "{{ rsyslog_pilot_evidence_path }}"
+            state: absent
+          failed_when: false
+
+        - name: Restore exact prior rsyslog state
+          ansible.builtin.systemd_service:
+            name: rsyslog.service
+            enabled: "{{ rsyslog_pilot_state.enabled == 'enabled' }}"
+            state: "{{ 'started' if rsyslog_pilot_state.active == 'active' else 'stopped' }}"
+          failed_when: false
+
+        - name: Stop after verified automatic rollback
+          ansible.builtin.fail:
+            msg: Rsyslog RAM pilot verification failed; the exact prior rsyslog state was restored.

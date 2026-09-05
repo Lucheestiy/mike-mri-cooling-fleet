@@ -1,0 +1,138 @@
+sensor_sets:
+  gwvs_set1_20260728:
+    description: First new five-probe set, calibrated while bundled on GWVS
+    calibration_state: calibrated_and_deployed
+    current_host: agcmr2
+    planned_destination: agcmr2
+    deployment:
+      installed_utc: "2026-07-28"
+      signature_evidence: reports/agcmr2_new_set_signature_20260728.csv
+      mapping_method: Live temperature signatures matched to established AGC MR2 ranges
+      mapping:
+        helium_in: "28-00000070a421"
+        helium_out: "28-00000070d37a"
+        primary_in: "28-00000070c02b"
+        primary_out: "28-0000006ebc26"
+        room: "28-000000703ac4"
+      corrected_signature_means_c:
+        helium_in: 20.8200
+        helium_out: 34.4378
+        primary_in: 13.1240
+        primary_out: 14.2784
+        room: 21.1979
+    calibration:
+      method: Normalize each probe mean to the five-probe grand mean
+      started_utc: "2026-07-28T15:29:58Z"
+      ended_utc: "2026-07-28T15:43:53Z"
+      sample_count_per_probe: 60
+      sample_interval_seconds_approx: 14
+      reference_mean_c: 23.339757
+      raw_evidence: reports/gwvs_set1_bundled_20260728.csv
+      offset_definition: corrected_temperature_c = raw_temperature_c + offset_c
+    probes:
+      "28-0000006ebc26":
+        mean_c: 23.446650
+        offset_c: -0.1069
+      "28-000000703ac4":
+        mean_c: 23.214350
+        offset_c: 0.1254
+      "28-00000070a421":
+        mean_c: 23.358083
+        offset_c: -0.0183
+      "28-00000070c02b":
+        mean_c: 23.382033
+        offset_c: -0.0423
+      "28-00000070d37a":
+        mean_c: 23.297667
+        offset_c: 0.0421
+
+  svi_aera_set_pending:
+    description: Second new five-probe set to validate on GWVS before deployment to SVI Aera
+    calibration_state: calibrated_and_deployed
+    current_host: svimr1
+    planned_destination: svimr1
+    deployment:
+      installed_utc: "2026-07-29"
+      signature_evidence: reports/svimr1_set2_signature_20260729.csv
+      mapping_method: Live signatures matched to established SVI MR1 Aera channel ranges
+      mapping:
+        helium_in: "28-000000b48d28"
+        helium_out: "28-000000b323cc"
+        primary_in: "28-000000b2d54b"
+        primary_out: "28-000000ba3e06"
+        room: "28-000000b958ec"
+      corrected_signature_means_c:
+        helium_in: 21.9331
+        helium_out: 29.4665
+        primary_in: 11.6040
+        primary_out: 13.3039
+        room: 21.5685
+    validation:
+      enumeration: five_of_five_stable
+      missing_reads: 0
+      power_up_sentinel_reads: 0
+      svi_previous_bus_state: zero_devices_detected
+      svi_post_install_bus_state: five_devices_detected
+    calibration:
+      method: Normalize the final stabilized 30-sample probe means to their grand mean
+      acquisition_started_utc: "2026-07-28T18:47:47Z"
+      acquisition_ended_utc: "2026-07-28T19:03:59Z"
+      total_valid_samples_per_probe: 67
+      calibration_window_samples: 30
+      reference_mean_c: 23.745587
+      raw_evidence: reports/gwvs_set2_svi_bundled_20260728.csv
+      offset_definition: corrected_temperature_c = raw_temperature_c + offset_c
+    probes:
+      "28-000000b2d54b":
+        calibration_window_mean_c: 23.751833
+        offset_c: -0.0062
+      "28-000000b323cc":
+        calibration_window_mean_c: 23.678933
+        offset_c: 0.0667
+      "28-000000b48d28":
+        calibration_window_mean_c: 23.664367
+        offset_c: 0.0812
+      "28-000000b958ec":
+        calibration_window_mean_c: 23.893500
+        offset_c: -0.1479
+      "28-000000ba3e06":
+        calibration_window_mean_c: 23.739300
+        offset_c: 0.0063
+
+  gwvs_final_set_pending:
+    description: Third new five-probe set intended to remain at GWV Magnetom Sola
+    calibration_state: calibrated_and_staged_permanent
+    current_staging_host: gwvs
+    planned_destination: gwvs
+    validation:
+      enumeration: five_of_five_stable
+      missing_reads: 0
+      power_up_sentinel_reads: 0
+      publishing_enabled: false
+      post_apply_corrected_mean_spread_c: 0.0660
+      field_gate: Record serial-number-to-pipe mapping before enabling publishing
+    calibration:
+      method: Normalize the final 50-sample post-bonding probe means to their grand mean
+      acquisition_started_utc: "2026-07-28T19:22:15Z"
+      acquisition_ended_utc: "2026-07-28T19:38:31Z"
+      total_valid_samples_per_probe: 70
+      calibration_window_samples: 50
+      reference_mean_c: 23.856496
+      raw_evidence: reports/gwvs_set3_permanent_bundled_20260728.csv
+      offset_definition: corrected_temperature_c = raw_temperature_c + offset_c
+    probes:
+      "28-0000006ff252":
+        calibration_window_mean_c: 23.508520
+        offset_c: 0.3480
+      "28-000000700c77":
+        calibration_window_mean_c: 24.081000
+        offset_c: -0.2245
+      "28-000000708c2c":
+        calibration_window_mean_c: 23.784760
+        offset_c: 0.0717
+      "28-00000070af65":
+        calibration_window_mean_c: 23.970980
+        offset_c: -0.1145
+      "28-0000007100e4":
+        calibration_window_mean_c: 23.937220
+        offset_c: -0.0807

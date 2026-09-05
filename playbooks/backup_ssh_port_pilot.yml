@@ -1,0 +1,154 @@
+---
+- name: Move the MR3 pull backup to its ordinary OpenSSH recovery port
+  hosts: backup_hub
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    backup_ssh_port_confirm: false
+    backup_target_id: agcmr3
+    backup_target_user: agcmr3
+    backup_target_ip: 100.103.6.98
+    backup_target_label: AGC MR3
+    backup_target_reported_host: agcmr3
+    backup_target_port: 2222
+    backup_helper_path: /usr/local/sbin/restic-pi-pull-backup
+    backup_targets_path: /etc/restic-pi-backup-targets.psv
+
+  tasks:
+    - name: Require the exact reviewed MR3 backup migration
+      ansible.builtin.assert:
+        that:
+          - backup_target_id == 'agcmr3'
+          - backup_target_ip == '100.103.6.98'
+          - backup_target_port | int == 2222
+          - ansible_check_mode or backup_ssh_port_confirm | bool
+        fail_msg: Run check mode first, then set backup_ssh_port_confirm=true.
+
+    - name: Verify the backup prerequisites and idle lock
+      ansible.builtin.shell: |
+        set -eu
+        test -x {{ backup_helper_path | quote }}
+        test -r {{ backup_targets_path | quote }}
+        test -s /root/.ssh/pi_backup_pull_ed25519
+        test -s /root/.config/restic-backup/password
+        findmnt -rn /mnt/t7backup >/dev/null
+        flock -n /run/restic-pi-pull-backup.lock true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Install, migrate, and prove the port-aware backup path
+      block:
+        - name: Install the backward-compatible port-aware pull helper
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../roles/backup_hub/files/restic-pi-pull-backup"
+            dest: "{{ backup_helper_path }}"
+            owner: root
+            group: root
+            mode: "0755"
+            backup: true
+            validate: /bin/bash -n %s
+          register: backup_port_helper_copy
+
+        - name: Set only the MR3 target to ordinary OpenSSH port 2222
+          ansible.builtin.lineinfile:
+            path: "{{ backup_targets_path }}"
+            regexp: "^{{ backup_target_id }}\\|"
+            line: >-
+              {{ backup_target_id }}|{{ backup_target_user }}|{{ backup_target_ip }}|{{ backup_target_label }}|{{ backup_target_reported_host }}|{{ backup_target_port }}
+            owner: root
+            group: root
+            mode: "0644"
+            backup: true
+          register: backup_port_target_edit
+
+        - name: Prove backup-key access over MR3 port 2222
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -p
+              - "{{ backup_target_port | string }}"
+              - -i
+              - /root/.ssh/pi_backup_pull_ed25519
+              - -o
+              - BatchMode=yes
+              - -o
+              - IdentitiesOnly=yes
+              - -o
+              - StrictHostKeyChecking=accept-new
+              - -o
+              - ConnectTimeout=12
+              - "{{ backup_target_user }}@{{ backup_target_ip }}"
+              - "true"
+          register: backup_port_export_check
+          changed_when: false
+          check_mode: false
+
+        - name: Require successful backup-key access
+          ansible.builtin.assert:
+            that:
+              - backup_port_export_check.rc == 0
+
+        - name: Capture the backup proof boundary
+          ansible.builtin.command: date +%s
+          register: backup_port_started
+          changed_when: false
+          check_mode: false
+
+        - name: Create a real encrypted MR3 snapshot over port 2222
+          ansible.builtin.command:
+            argv:
+              - "{{ backup_helper_path }}"
+              - "{{ backup_target_id }}"
+          changed_when: true
+          when: not ansible_check_mode
+
+        - name: Decrypt and restore-test the new MR3 snapshot
+          ansible.builtin.command:
+            argv:
+              - /usr/local/sbin/coolmri-restic-restore-test
+              - "{{ backup_target_id }}"
+          changed_when: true
+          when: not ansible_check_mode
+
+        - name: Require a new successful snapshot and matching restore proof
+          ansible.builtin.shell: |
+            set -eu
+            marker="/var/lib/coolmri-fleet/backup-status/{{ backup_target_id }}.json"
+            restore="/var/lib/coolmri-fleet/restore-tests/{{ backup_target_id }}.json"
+            test "$(jq -r .status "$marker")" = success
+            test "$(jq -r .status "$restore")" = success
+            test "$(jq -r .snapshot_id "$marker")" = "$(jq -r .snapshot_id "$restore")"
+            completed="$(date -d "$(jq -r .completed_at "$marker")" +%s)"
+            test "$completed" -ge {{ backup_port_started.stdout | int }}
+          args:
+            executable: /bin/bash
+          changed_when: false
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Restore the prior MR3 target record
+          ansible.builtin.copy:
+            src: "{{ backup_port_target_edit.backup_file }}"
+            dest: "{{ backup_targets_path }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0644"
+          when: backup_port_target_edit.backup_file | default('') | length > 0
+
+        - name: Restore the prior pull helper
+          ansible.builtin.copy:
+            src: "{{ backup_port_helper_copy.backup_file }}"
+            dest: "{{ backup_helper_path }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          when: backup_port_helper_copy.backup_file | default('') | length > 0
+
+        - name: Stop after automatic backup-path rollback
+          ansible.builtin.fail:
+            msg: The MR3 backup port migration failed and was rolled back.

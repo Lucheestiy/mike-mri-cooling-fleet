@@ -5,6 +5,15 @@
       - (mri_user | length) > 0
     fail_msg: "Set `mri_user` in inventory/host_vars/<host>.yml"
 
+- name: Require explicit reviewed camera deployment approval
+  ansible.builtin.assert:
+    that:
+      - camera_edge_deploy_approved | default(false) | bool
+    fail_msg: >-
+      Camera deployment is disabled by default. Use a guarded camera convergence
+      playbook with backup, rollback, hardware-canary, and telemetry evidence;
+      do not invoke this role directly against a working camera.
+
 - name: Set camera edge paths
   ansible.builtin.set_fact:
     camera_edge_base_dir: "{{ camera_edge.base_dir | default('/home/' ~ mri_user ~ '/mri-cooling-camera', true) }}"
@@ -24,15 +33,9 @@
       - rpicam-apps
       - libcamera-tools
       - v4l-utils
-      - tesseract-ocr
-      - ssocr
-      - git
       - cron
       - python3-venv
       - python3-pip
-      - python3-libcamera
-      - python3-picamera2
-      - python3-opencv
       - python3-numpy
       - python3-pil
     update_cache: true
@@ -58,57 +61,23 @@
     creates: "{{ camera_edge_base_dir }}/venv/bin/python3"
   become_user: "{{ mri_user }}"
 
-- name: Install camera python deps
-  ansible.builtin.command: "{{ camera_edge_base_dir }}/venv/bin/pip install -U pip pytesseract python-dotenv requests schedule"
+- name: Install camera python dependencies
+  ansible.builtin.command: "{{ camera_edge_base_dir }}/venv/bin/pip install -U pip python-dotenv requests"
   changed_when: false
   become_user: "{{ mri_user }}"
 
-- name: Install camera edge scripts (from role files)
+- name: Install reviewed camera runtime files only
   ansible.builtin.copy:
-    src: edge/
-    dest: "{{ camera_edge_edge_dir }}/"
+    src: "edge/{{ item.name }}"
+    dest: "{{ camera_edge_edge_dir }}/{{ item.name }}"
     owner: "{{ mri_user }}"
     group: "{{ mri_user }}"
-    mode: "0644"
-
-- name: Find camera edge text files for path normalization
-  ansible.builtin.find:
-    paths: "{{ camera_edge_edge_dir }}"
-    file_type: file
-    patterns:
-      - "*.py"
-      - "*.sh"
-      - "*.md"
-      - "*.txt"
-      - "*.html"
-  register: camera_edge_text_files
-
-- name: Replace legacy hardcoded edge path in copied scripts
-  ansible.builtin.replace:
-    path: "{{ item.path }}"
-    regexp: "/home/gmcmr2c/mri-cooling-camera/edge"
-    replace: "{{ camera_edge_edge_dir }}"
-  loop: "{{ camera_edge_text_files.files }}"
-
-- name: Replace legacy hardcoded venv path in copied scripts
-  ansible.builtin.replace:
-    path: "{{ item.path }}"
-    regexp: "/home/gmcmr2c/mri-cooling-camera/venv"
-    replace: "{{ camera_edge_base_dir }}/venv"
-  loop: "{{ camera_edge_text_files.files }}"
-
-- name: Ensure camera edge shell scripts are executable
-  ansible.builtin.find:
-    paths: "{{ camera_edge_edge_dir }}"
-    patterns: "*.sh"
-    file_type: file
-  register: camera_edge_shell_scripts
-
-- name: Set execute bit on camera edge shell scripts
-  ansible.builtin.file:
-    path: "{{ item.path }}"
-    mode: "0755"
-  loop: "{{ camera_edge_shell_scripts.files }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {name: scheduled_capture.py, mode: "0644"}
+    - {name: retry_failed_sessions.py, mode: "0644"}
+    - {name: run_scheduled_capture.sh, mode: "0755"}
+    - {name: run_retry_check.sh, mode: "0755"}
 
 - name: Install camera edge .env
   ansible.builtin.template:
@@ -125,7 +94,7 @@
     minute: "0"
     hour: "{{ item }}"
     user: "{{ mri_user }}"
-    job: "{{ camera_edge_edge_dir }}/run_scheduled_capture.sh >> {{ camera_edge_edge_dir }}/logs/cron.log 2>&1"
+    job: "{{ camera_edge_edge_dir }}/run_scheduled_capture.sh >/dev/null 2>&1"
   loop: "{{ camera_edge.scheduled_hours | default([9, 15]) }}"
 
 - name: Schedule camera retry check (every N minutes)
@@ -134,4 +103,4 @@
     state: "{{ 'present' if (camera_edge.install_cron | default(true)) else 'absent' }}"
     minute: "*/{{ camera_edge.retry_every_minutes | default(5) }}"
     user: "{{ mri_user }}"
-    job: "{{ camera_edge_edge_dir }}/run_retry_check.sh >> {{ camera_edge_edge_dir }}/logs/cron.log 2>&1"
+    job: "{{ camera_edge_edge_dir }}/run_retry_check.sh >/dev/null 2>&1"

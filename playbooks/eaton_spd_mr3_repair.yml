@@ -1,0 +1,77 @@
+---
+- name: Repair the MR3 Eaton Ethernet path and website uploader
+  hosts: agcmr3
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    ansible_become_exe: /home/agcmr3/.local/bin/sudo-rs-ansible-compat
+    eaton_spd_repair_confirm: false
+
+  tasks:
+    - name: Require an explicit MR3 Eaton repair confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or eaton_spd_repair_confirm | bool
+        fail_msg: Run check mode first, then set eaton_spd_repair_confirm=true.
+
+    - name: Apply the reversible Eaton repair
+      block:
+        - name: Install and verify the Eaton role
+          ansible.builtin.include_role:
+            name: eaton_spd
+
+      rescue:
+        - name: Stop the repaired user uploader during rollback
+          ansible.builtin.command:
+            argv:
+              - runuser
+              - -u
+              - agcmr3
+              - --
+              - env
+              - XDG_RUNTIME_DIR=/run/user/1000
+              - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+              - systemctl
+              - --user
+              - stop
+              - surge-monitor.service
+          changed_when: true
+          failed_when: false
+
+        - name: Remove the fleet Eaton Netplan override
+          ansible.builtin.file:
+            path: /etc/netplan/95-coolmri-eaton-eth0.yaml
+            state: absent
+
+        - name: Regenerate the prior NetworkManager profile
+          ansible.builtin.command:
+            argv: [netplan, generate]
+          changed_when: true
+          failed_when: false
+
+        - name: Reload the prior NetworkManager profile
+          ansible.builtin.command:
+            argv: [nmcli, connection, reload]
+          changed_when: true
+          failed_when: false
+
+        - name: Restore the static Eaton address helper
+          ansible.builtin.systemd_service:
+            name: eth0-spd-ip.service
+            state: restarted
+            enabled: true
+          failed_when: false
+
+        - name: Restore the old local Eaton poller
+          ansible.builtin.systemd_service:
+            name: spd-poller.service
+            state: started
+            enabled: true
+          failed_when: false
+
+        - name: Stop after automatic Eaton rollback
+          ansible.builtin.fail:
+            msg: The MR3 Eaton repair failed; the legacy static-address helper and local poller were restored.
+

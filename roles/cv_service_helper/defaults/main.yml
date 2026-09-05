@@ -1,0 +1,3 @@
+cv_sensor_service:
+  helper_path: /usr/local/sbin/cv-sensor-service
+  sudoers_path: /etc/sudoers.d/cv-sensor-service

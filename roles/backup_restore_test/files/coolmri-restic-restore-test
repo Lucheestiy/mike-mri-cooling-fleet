@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BASE="${COOLMRI_RESTIC_BASE:-/mnt/t7backup/restic-pi-repos}"
+TARGETS="${COOLMRI_RESTIC_TARGETS:-/etc/restic-pi-backup-targets.psv}"
+REPORT_DIR="${COOLMRI_RESTORE_REPORT_DIR:-/var/lib/coolmri-fleet/restore-tests}"
+export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-/root/.config/restic-backup/password}"
+export RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-/root/.cache/restic}"
+
+target="${1:-}"
+started_epoch="$(date +%s)"
+snapshot_id=""
+snapshot_time=""
+archive_path=""
+temporary=""
+
+write_report() {
+  local status="$1" message="$2" completed_epoch report_tmp
+  completed_epoch="$(date +%s)"
+  mkdir -p "$REPORT_DIR"
+  report_tmp="$(mktemp "$REPORT_DIR/.${target:-unknown}.XXXXXX")"
+  jq -cn \
+    --arg repository "$target" \
+    --arg status "$status" \
+    --arg message "$message" \
+    --arg snapshot_id "$snapshot_id" \
+    --arg snapshot_time "$snapshot_time" \
+    --arg archive_path "$archive_path" \
+    --arg completed_at "$(date --iso-8601=seconds)" \
+    --argjson duration_seconds "$((completed_epoch - started_epoch))" \
+    '{repository:$repository,status:$status,message:$message,snapshot_id:$snapshot_id,snapshot_time:$snapshot_time,archive_path:$archive_path,restored_path:"etc/os-release",completed_at:$completed_at,duration_seconds:$duration_seconds}' \
+    >"$report_tmp"
+  chmod 0644 "$report_tmp"
+  mv -f "$report_tmp" "$REPORT_DIR/$target.json"
+}
+
+cleanup() {
+  [[ -z "$temporary" ]] || rm -rf -- "$temporary"
+}
+
+failure() {
+  local line="$1" code="$2"
+  trap - ERR
+  write_report failure "restore verifier failed at line $line (exit $code)"
+  exit "$code"
+}
+
+trap cleanup EXIT
+trap 'failure "$LINENO" "$?"' ERR
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Must run as root." >&2
+  exit 77
+fi
+if [[ $# -ne 1 || ! "$target" =~ ^[a-z0-9][a-z0-9-]{1,63}$ ]]; then
+  echo "Usage: coolmri-restic-restore-test TARGET_ID" >&2
+  exit 64
+fi
+if ! grep -qE "^${target//-/\\-}\\|" "$TARGETS"; then
+  echo "Unknown configured target: $target" >&2
+  exit 65
+fi
+if [[ ! -r "$RESTIC_PASSWORD_FILE" || ! -d "$BASE/$target" ]]; then
+  echo "Repository or password file unavailable for $target." >&2
+  exit 66
+fi
+
+exec 9>"/run/coolmri-restic-restore-test.lock"
+if ! flock -n 9; then
+  echo "Another restore test is already running." >&2
+  exit 75
+fi
+
+snapshot_json="$(restic -r "$BASE/$target" snapshots --host "$target" --tag pi-pull --json)"
+snapshot_id="$(jq -r 'sort_by(.time) | last | .id // empty' <<<"$snapshot_json")"
+snapshot_time="$(jq -r 'sort_by(.time) | last | .time // empty' <<<"$snapshot_json")"
+if [[ -z "$snapshot_id" ]]; then
+  echo "No pi-pull snapshot found for $target." >&2
+  exit 67
+fi
+
+archive_path="$(
+  restic -r "$BASE/$target" ls --json "$snapshot_id" \
+    | jq -r 'select(.struct_type == "node" and .type == "file" and (.path | endswith(".tar"))) | .path' \
+    | head -n 1
+)"
+if [[ -z "$archive_path" ]]; then
+  echo "No streamed tar archive found in snapshot $snapshot_id." >&2
+  exit 68
+fi
+
+temporary="$(mktemp -d "/dev/shm/coolmri-restore-${target}.XXXXXX")"
+restic -r "$BASE/$target" dump "$snapshot_id" "$archive_path" \
+  | tar -xpf - -C "$temporary" --no-same-owner --no-same-permissions \
+      etc/os-release
+
+restored="$temporary/etc/os-release"
+if [[ -L "$restored" ]]; then
+  restic -r "$BASE/$target" dump "$snapshot_id" "$archive_path" \
+    | tar -xpf - -C "$temporary" --no-same-owner --no-same-permissions \
+        usr/lib/os-release
+fi
+test -s "$restored"
+grep -q '^PRETTY_NAME=' "$restored"
+sha256sum "$restored" >/dev/null
+
+write_report success "latest snapshot decrypted and etc/os-release restored in tmpfs"
+echo "Restore test succeeded for $target using snapshot ${snapshot_id:0:12}."

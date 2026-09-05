@@ -1,0 +1,329 @@
+---
+- name: Move one reviewed camera workload to bounded RAM logs
+  hosts: "{{ camera_ram_logs_target | default('none') }}"
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    camera_ram_logs_wave_confirm: false
+    camera_ram_logs_target_effective: "{{ camera_ram_logs_target | default('none') }}"
+    camera_ram_logs_allowed_targets:
+      - oswmr1
+      - oswmr2
+      - svimr2
+      - muncymr
+      - jsmr
+      - pittstonsola
+      - pittstonvida
+      - gcmcsola
+      - gcmcmr2
+      - gswbsola
+    camera_wave_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ camera_wave_user }}/.local/bin/sudo-rs-ansible-compat"
+    camera_wave_edge_dir: "/home/{{ camera_wave_user }}/mri-cooling-camera/edge"
+    camera_wave_sensor_env: "/home/{{ camera_wave_user }}/mike-mri-cooling/.env"
+    camera_wave_sensor_source: "/home/{{ camera_wave_user }}/mike-mri-cooling/src/pi_sensor.py"
+    camera_wave_runtime_paths:
+      - "{{ camera_wave_edge_dir }}/scheduled_capture.py"
+      - "{{ camera_wave_edge_dir }}/retry_failed_sessions.py"
+      - "{{ camera_wave_edge_dir }}/run_scheduled_capture.sh"
+      - "{{ camera_wave_edge_dir }}/run_retry_check.sh"
+    camera_wave_schedule_strategy: >-
+      {{ 'cron_service_watchdog' if inventory_hostname == 'oswmr2' else 'user_crontab' }}
+
+  pre_tasks:
+    - name: Load reviewed camera and backup evidence
+      ansible.builtin.set_fact:
+        camera_wave_plan: >-
+          {{ lookup('ansible.builtin.file', playbook_dir + '/../inventory/camera_convergence.yml') | from_yaml }}
+        camera_wave_backup: >-
+          {{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}
+        camera_wave_observations: []
+        camera_wave_latest_audit: >-
+          {{ lookup(
+               'ansible.builtin.file',
+               (query('ansible.builtin.fileglob', playbook_dir + '/../reports/audit_*.json') | sort | last)
+             ) | from_json }}
+
+    - name: Load completed natural camera observations
+      ansible.builtin.set_fact:
+        camera_wave_observations: >-
+          {{ camera_wave_observations
+             + [lookup('ansible.builtin.file', item) | from_json] }}
+      loop: "{{ query('ansible.builtin.fileglob', playbook_dir + '/../reports/camera_observation_*.json') }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      no_log: true
+
+    - name: Select the audited GCMC MR2 reference build
+      ansible.builtin.set_fact:
+        camera_wave_reference_audit: >-
+          {{ camera_wave_latest_audit.results
+             | selectattr('inventory_name', 'equalto', 'gcmcmr2')
+             | list | first | default({}) }}
+
+    - name: Select this host's reviewed identities
+      ansible.builtin.set_fact:
+        camera_wave_contract: "{{ camera_wave_plan.hosts[inventory_hostname] | default({}) }}"
+
+    - name: Select exact backup and restore records
+      ansible.builtin.set_fact:
+        camera_wave_repository: "{{ camera_wave_contract.backup_repository }}"
+        camera_wave_sensor_site_id: "{{ camera_wave_contract.sensor_site_id }}"
+        camera_wave_backup_status: >-
+          {{ camera_wave_backup.repository_status
+             | selectattr('repository', 'equalto', camera_wave_contract.backup_repository)
+             | list | first | default({}) }}
+        camera_wave_restore_status: >-
+          {{ camera_wave_backup.restore_tests
+             | selectattr('repository', 'equalto', camera_wave_contract.backup_repository)
+             | list | first | default({}) }}
+
+    - name: Require one explicit reviewed RAM-log target
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or camera_ram_logs_wave_confirm | bool
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == camera_ram_logs_target_effective
+          - inventory_hostname in camera_ram_logs_allowed_targets
+          - camera_wave_contract.target is mapping
+          - camera_wave_backup.batch.result == 'success'
+          - camera_wave_backup.batch.timer_active | bool
+          - camera_wave_backup_status.activity_recent | default(false) | bool
+          - camera_wave_restore_status.status | default('') == 'success'
+          - camera_wave_restore_status.recent | default(false) | bool
+        fail_msg: >-
+          Run --check on one allowlisted user-crontab camera host, then pass
+          camera_ram_logs_wave_confirm=true. Current backup and exact restore
+          evidence are mandatory.
+
+    - name: Require exact natural proof from the first remote RAM-log expansion
+      ansible.builtin.assert:
+        that:
+          - camera_wave_reference_audit.status | default('') == 'ok'
+          - camera_wave_reference_audit.facts.camera_logging.memory_only | default(false) | bool
+          - >-
+            camera_wave_observations
+            | selectattr('inventory_name', 'equalto', 'gcmcmr2')
+            | selectattr('ok', 'defined')
+            | selectattr('ok', 'equalto', true)
+            | selectattr('expected_source', 'defined')
+            | selectattr('expected_source', 'equalto', 'camera_ocr')
+            | selectattr('camera_session.count', 'defined')
+            | selectattr('camera_session.count', 'equalto', 10)
+            | selectattr('after.camera.fingerprint', 'defined')
+            | selectattr(
+                'after.camera.fingerprint', 'equalto',
+                camera_wave_reference_audit.facts.camera_logging.software.fingerprint
+              )
+            | list | length > 0
+        fail_msg: >-
+          Do not expand beyond GCMC MR2 until its natural 10/10 camera_ocr
+          session proves the exact audited build still works with RAM logs.
+      when: inventory_hostname != 'gcmcmr2'
+
+    - name: Require installed privilege compatibility shim
+      ansible.builtin.stat:
+        path: "{{ ansible_become_exe }}"
+      become: false
+      register: camera_wave_become_shim
+      check_mode: false
+
+    - name: Verify package manager is idle
+      ansible.builtin.shell: >-
+        ! systemctl is-active --quiet apt-daily-upgrade.service &&
+        ! systemctl is-active --quiet apt-daily.service &&
+        ! pgrep -x apt-get >/dev/null &&
+        ! pgrep -x dpkg >/dev/null &&
+        ! pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade$' >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Capture exact protected sensor and camera hashes
+      ansible.builtin.command:
+        argv: "{{ ['sha256sum', camera_wave_sensor_source] + camera_wave_runtime_paths }}"
+      register: camera_wave_hashes_before
+      changed_when: false
+      check_mode: false
+
+    - name: Capture exact user camera schedule
+      ansible.builtin.command:
+        argv: [crontab, -u, "{{ camera_wave_user }}", -l]
+      register: camera_wave_crontab_before
+      changed_when: false
+      check_mode: false
+      when: camera_wave_schedule_strategy == 'user_crontab'
+
+    - name: Capture exact cron.d camera schedule metadata
+      ansible.builtin.stat:
+        path: /etc/cron.d/mri-cooling-camera
+        checksum_algorithm: sha256
+      register: camera_wave_crond_before
+      check_mode: false
+      when: camera_wave_schedule_strategy == 'cron_service_watchdog'
+
+    - name: Read exact cron.d camera schedule
+      ansible.builtin.slurp:
+        src: /etc/cron.d/mri-cooling-camera
+      register: camera_wave_crond_bytes
+      check_mode: false
+      no_log: true
+      when: camera_wave_schedule_strategy == 'cron_service_watchdog'
+
+    - name: Verify exact probes, service, throttle, memory, and idle camera
+      ansible.builtin.shell: |
+        set -o pipefail
+        test "{{ camera_wave_become_shim.stat.executable | default(false) | bool | ternary('yes', 'no') }}" = yes
+        test -r '{{ camera_wave_sensor_env }}'
+        systemctl is-active --quiet mri-sensor.service
+        configured="$(awk -F= '/^PROBE_.*_ID=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2}' '{{ camera_wave_sensor_env }}' | sort -u)"
+        physical="$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' -printf '%f\n' | sort -u)"
+        test -n "$configured"
+        test "$configured" = "$physical"
+        test "$(vcgencmd get_throttled | sed 's/.*=//')" = "0x0"
+        test "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)" -ge 262144
+        ! pgrep -u '{{ camera_wave_user }}' -f 'run_(scheduled_capture|retry_check)\.sh|scheduled_capture\.py|retry_failed_sessions\.py|rpicam-still|libcamera-still' >/dev/null
+      args:
+        executable: /bin/bash
+      register: camera_wave_health_before
+      changed_when: false
+      check_mode: false
+
+    - name: Require the expected user-crontab camera jobs
+      ansible.builtin.assert:
+        that:
+          - camera_wave_crontab_before.rc == 0
+          - camera_wave_crontab_before.stdout is search('run_scheduled_capture\\.sh')
+          - camera_wave_crontab_before.stdout is search('run_retry_check\\.sh')
+      when: camera_wave_schedule_strategy == 'user_crontab'
+
+    - name: Require the reviewed OSW MR2 cron.d contract
+      ansible.builtin.assert:
+        that:
+          - camera_wave_crond_before.stat.isreg | default(false)
+          - camera_wave_crond_before.stat.pw_name == 'root'
+          - camera_wave_crond_before.stat.gr_name == 'root'
+          - camera_wave_crond_before.stat.mode == '0644'
+          - (camera_wave_crond_bytes.content | b64decode) is search('(?m)^\\*/5 \\* \\* \\* \\* oswmr2 .*run_retry_check\\.sh')
+          - (camera_wave_crond_bytes.content | b64decode) is search('(?m)^10 2 \\* \\* \\* oswmr2 .*prune_failed_sessions\\.sh')
+          - (camera_wave_crond_bytes.content | b64decode) is search('(?m)^20 9 \\* \\* \\* oswmr2 .*run_scheduled_capture\\.sh')
+          - (camera_wave_crond_bytes.content | b64decode) is search('(?m)^20 15 \\* \\* \\* oswmr2 .*run_scheduled_capture\\.sh')
+      when: camera_wave_schedule_strategy == 'cron_service_watchdog'
+
+    - name: Capture current sensor telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      register: camera_wave_telemetry_before_response
+      changed_when: false
+      check_mode: false
+
+    - name: Select and require current sensor telemetry
+      ansible.builtin.set_fact:
+        camera_wave_telemetry_before: >-
+          {{ camera_wave_telemetry_before_response.json
+             | selectattr('id', 'equalto', camera_wave_sensor_site_id)
+             | list | first | default({}) }}
+
+    - name: Require online current sensor telemetry
+      ansible.builtin.assert:
+        that:
+          - camera_wave_telemetry_before.id | default('') == camera_wave_sensor_site_id
+          - not (camera_wave_telemetry_before.is_offline | default(true) | bool)
+          - camera_wave_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Apply and verify reversible RAM logging
+      block:
+        - name: Apply proven camera RAM-log role
+          ansible.builtin.include_role:
+            name: camera_ram_logs
+          vars:
+            mri_user: "{{ camera_wave_user }}"
+            camera_ram_logs_state: apply
+            camera_ram_logs_schedule_strategy: "{{ camera_wave_schedule_strategy }}"
+
+        - name: Re-read protected sensor and camera hashes
+          ansible.builtin.command:
+            argv: "{{ ['sha256sum', camera_wave_sensor_source] + camera_wave_runtime_paths }}"
+          register: camera_wave_hashes_after
+          changed_when: false
+          check_mode: false
+
+        - name: Re-verify exact probes, service, throttle, and idle camera
+          ansible.builtin.shell: |
+            set -o pipefail
+            systemctl is-active --quiet mri-sensor.service
+            configured="$(awk -F= '/^PROBE_.*_ID=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2}' '{{ camera_wave_sensor_env }}' | sort -u)"
+            physical="$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' -printf '%f\n' | sort -u)"
+            test -n "$configured"
+            test "$configured" = "$physical"
+            test "$(vcgencmd get_throttled | sed 's/.*=//')" = "0x0"
+            ! pgrep -u '{{ camera_wave_user }}' -f 'run_(scheduled_capture|retry_check)\.sh|scheduled_capture\.py|retry_failed_sessions\.py|rpicam-still|libcamera-still' >/dev/null
+          args:
+            executable: /bin/bash
+          register: camera_wave_health_after
+          changed_when: false
+          check_mode: false
+
+        - name: Wait for sensor telemetry to advance after transition
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: camera_wave_telemetry_after_response
+          changed_when: false
+          check_mode: false
+          retries: 6
+          delay: 10
+          until: >-
+            ((camera_wave_telemetry_after_response.json
+              | selectattr('id', 'equalto', camera_wave_sensor_site_id)
+              | map(attribute='last_updated') | first | default(0)) | int)
+            > (camera_wave_telemetry_before.last_updated | int)
+
+        - name: Prove application, schedule, and sensor path stayed exact
+          ansible.builtin.assert:
+            that:
+              - camera_wave_hashes_after.stdout == camera_wave_hashes_before.stdout
+              - >-
+                camera_wave_schedule_strategy == 'cron_service_watchdog'
+                or camera_ram_logs_crontab_after.stdout == camera_wave_crontab_before.stdout
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Inspect whether the RAM-log transition reached linked state
+          ansible.builtin.stat:
+            path: "{{ camera_wave_edge_dir }}/logs"
+            follow: false
+          register: camera_wave_failed_link
+
+        - name: Inspect whether the persistent archive exists
+          ansible.builtin.stat:
+            path: "{{ camera_wave_edge_dir }}/logs.persistent-before-ram"
+          register: camera_wave_failed_archive
+
+        - name: Restore persistent logs and exact schedule after failed verification
+          ansible.builtin.include_role:
+            name: camera_ram_logs
+          vars:
+            mri_user: "{{ camera_wave_user }}"
+            camera_ram_logs_state: rollback
+            camera_ram_logs_schedule_strategy: "{{ camera_wave_schedule_strategy }}"
+          when:
+            - camera_wave_failed_link.stat.islnk | default(false)
+            - camera_wave_failed_archive.stat.isdir | default(false)
+
+        - name: Stop the wave after rollback
+          ansible.builtin.fail:
+            msg: >-
+              Camera RAM-log verification failed. Any completed link transition
+              was rolled back; no later host was attempted.

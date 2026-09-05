@@ -1,0 +1,87 @@
+---
+- name: Roll back nearby MRI and CV storage-health pilots
+  hosts: agcmr1:agcmr3:gmcep1and2:gmcep3:gmcir3:oswmr1:oswmr2:svimr1:svimr2:gbh:shmr:muncymr:pittstonsola:pittstonvida:gcmcsola:gswbsola:gwvskyra:gr
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    mri_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    storage_health_pilot_hosts:
+      - agcmr1
+      - agcmr3
+      - gmcep1and2
+      - gmcep3
+      - gmcir3
+      - oswmr1
+      - oswmr2
+      - svimr1
+      - svimr2
+      - gbh
+      - shmr
+      - muncymr
+      - pittstonsola
+      - pittstonvida
+      - gcmcsola
+      - gswbsola
+      - gwvskyra
+      - gr
+  pre_tasks:
+    - name: Require explicit serial rollback confirmation
+      ansible.builtin.assert:
+        that:
+          - storage_health_rollback_confirm | default(false) | bool
+          - ansible_play_batch | length == 1
+          - inventory_hostname in storage_health_pilot_hosts
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+
+  tasks:
+    - name: Remove narrow storage-health sudo rule
+      ansible.builtin.file:
+        path: /etc/sudoers.d/coolmri-storage-health
+        state: absent
+
+    - name: Remove sanitized storage-health helper
+      ansible.builtin.file:
+        path: /usr/local/sbin/coolmri-storage-health
+        state: absent
+
+    - name: Keep SMART daemon stopped during rollback
+      ansible.builtin.systemd_service:
+        name: smartmontools.service
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Remove pilot SMART tooling package
+      ansible.builtin.apt:
+        name: smartmontools
+        state: absent
+        purge: false
+        autoremove: false
+
+    - name: Verify helper and package are absent
+      ansible.builtin.shell: >-
+        test ! -e /usr/local/sbin/coolmri-storage-health &&
+        ! command -v smartctl >/dev/null 2>&1
+      args:
+        executable: /bin/bash
+      changed_when: false

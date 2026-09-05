@@ -214,6 +214,8 @@ def require_password(env_name: str) -> str:
 def ssh_base_command(host: dict) -> list[str]:
     return [
         "ssh",
+        "-p",
+        str(host.get("ansible_port") or 22),
         "-i",
         host.get("ansible_ssh_private_key_file") or DEFAULT_KEY,
         "-o",
@@ -324,6 +326,7 @@ def render_ssh_config(selected_hosts: list[dict]) -> str:
                 f"# {host.get('mri_label', host['inventory_name'])} - {host.get('mri_site', '')}",
                 f"Host {' '.join(aliases)}",
                 f"    HostName {host['ansible_host']}",
+                f"    Port {host.get('ansible_port') or 22}",
                 f"    User {host['ansible_user']}",
                 f"    IdentityFile {host.get('ansible_ssh_private_key_file') or DEFAULT_KEY}",
                 "    IdentitiesOnly yes",
@@ -341,6 +344,7 @@ def render_ssh_config(selected_hosts: list[dict]) -> str:
                 [
                     f"Host {alt_alias} {label_alt}",
                     f"    HostName {host['ansible_host']}",
+                    f"    Port {host.get('ansible_port') or 22}",
                     f"    User {alt_user}",
                     f"    IdentityFile {host.get('ansible_ssh_private_key_file') or DEFAULT_KEY}",
                     "    IdentitiesOnly yes",
@@ -405,7 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("targets", nargs="*", help="Host or group selectors.")
     audit_parser.add_argument("--no-bootstrap", action="store_true", help="Do not try password SSH bootstrap.")
     audit_parser.add_argument("--connect-timeout", type=int, default=6)
-    audit_parser.add_argument("--command-timeout", type=int, default=45)
+    audit_parser.add_argument("--command-timeout", type=int, default=60)
 
     update_parser = subparsers.add_parser("update", help="Run fleet_ops update on selectors.")
     update_parser.add_argument("targets", nargs="+", help="Host or group selectors.")
@@ -427,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
         "check", help="Show pending package count, reboot flag, and dpkg health."
     )
     check_parser.add_argument("targets", nargs="*", help="Host or group selectors.")
-    check_parser.add_argument("--command-timeout", type=int, default=45)
+    check_parser.add_argument("--command-timeout", type=int, default=60)
 
     ssh_config_parser = subparsers.add_parser(
         "ssh-config", help="Render or write the generated fleet SSH config include."

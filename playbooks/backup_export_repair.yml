@@ -1,0 +1,186 @@
+---
+- name: Repair legacy backup exporters exposed by restore verification
+  hosts: gbh:muncymr
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    backup_export_repair_confirm: false
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    backup_export_repair_allowed: [gbh, muncymr]
+    backup_export_repair_site_ids:
+      gbh: GBHAera
+      muncymr: MuncySola
+    backup_export_repair_expected_probes:
+      gbh: 5
+      muncymr: 5
+    backup_export_repair_stage: /run/coolmri-pi-backup-export.before
+
+  pre_tasks:
+    - name: Require explicit repair confirmation and hard host boundary
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or backup_export_repair_confirm | bool
+          - inventory_hostname in backup_export_repair_allowed
+
+    - name: Capture sensor application before helper repair
+      ansible.builtin.stat:
+        path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+        checksum_algorithm: sha256
+      register: backup_export_repair_app_before
+      become: false
+
+    - name: Count physical probes before helper repair
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: backup_export_repair_probes_before
+      become: false
+
+    - name: Require exact healthy sensor state before helper repair
+      ansible.builtin.assert:
+        that:
+          - backup_export_repair_app_before.stat.exists
+          - backup_export_repair_probes_before.matched | int == backup_export_repair_expected_probes[inventory_hostname]
+
+    - name: Require active sensor service before helper repair
+      ansible.builtin.command:
+        argv: [systemctl, is-active, mri-sensor.service]
+      changed_when: false
+      check_mode: false
+      become: false
+
+    - name: Capture current production telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: backup_export_repair_telemetry_before_response
+
+    - name: Select current host telemetry
+      ansible.builtin.set_fact:
+        backup_export_repair_telemetry_before: >-
+          {{ backup_export_repair_telemetry_before_response.json
+             | selectattr('id', 'equalto', backup_export_repair_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require current pre-repair telemetry
+      ansible.builtin.assert:
+        that:
+          - backup_export_repair_telemetry_before.id | default('') == backup_export_repair_site_ids[inventory_hostname]
+          - not (backup_export_repair_telemetry_before.is_offline | default(true) | bool)
+          - backup_export_repair_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Repair helper transactionally
+      block:
+        - name: Preserve legacy helper in RAM for rollback
+          ansible.builtin.copy:
+            src: /usr/local/sbin/pi-backup-export
+            dest: "{{ backup_export_repair_stage }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          when: not ansible_check_mode
+
+        - name: Install canonical fixed-path export helper
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../roles/backup_export/files/pi-backup-export"
+            dest: /usr/local/sbin/pi-backup-export
+            owner: root
+            group: root
+            mode: "0755"
+          register: backup_export_repair_helper
+
+        - name: Verify sanitized helper check response
+          ansible.builtin.command:
+            argv: [sudo, -n, /usr/local/sbin/pi-backup-export, check]
+          become: false
+          changed_when: false
+          check_mode: false
+          register: backup_export_repair_check
+          when: not ansible_check_mode
+
+        - name: Require canonical non-streaming check behavior
+          ansible.builtin.assert:
+            that:
+              - backup_export_repair_check.stdout is match('^backup-export-ready user=' ~ ansible_user ~ ' paths=[0-9]+$')
+              - backup_export_repair_check.stderr | length == 0
+          when: not ansible_check_mode
+
+        - name: Recheck sensor application and probes
+          ansible.builtin.stat:
+            path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+            checksum_algorithm: sha256
+          register: backup_export_repair_app_after
+          become: false
+          when: not ansible_check_mode
+
+        - name: Count physical probes after helper repair
+          ansible.builtin.find:
+            paths: /sys/bus/w1/devices
+            patterns: "28-*"
+            file_type: link
+            recurse: false
+          register: backup_export_repair_probes_after
+          become: false
+          when: not ansible_check_mode
+
+        - name: Require unchanged application and exact probes
+          ansible.builtin.assert:
+            that:
+              - backup_export_repair_app_after.stat.checksum == backup_export_repair_app_before.stat.checksum
+              - backup_export_repair_probes_after.matched | int == backup_export_repair_expected_probes[inventory_hostname]
+          when: not ansible_check_mode
+
+        - name: Require active sensor service after helper repair
+          ansible.builtin.command:
+            argv: [systemctl, is-active, mri-sensor.service]
+          changed_when: false
+          become: false
+          when: not ansible_check_mode
+
+        - name: Wait for production telemetry to advance
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: backup_export_repair_telemetry_after_response
+          until: >-
+            ((backup_export_repair_telemetry_after_response.json
+              | selectattr('id', 'equalto', backup_export_repair_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (backup_export_repair_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Restore legacy helper after failed verification
+          ansible.builtin.copy:
+            src: "{{ backup_export_repair_stage }}"
+            dest: /usr/local/sbin/pi-backup-export
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Stop after rollback
+          ansible.builtin.fail:
+            msg: "Backup exporter repair failed and the prior helper was restored."
+
+      always:
+        - name: Remove RAM rollback stage
+          ansible.builtin.file:
+            path: "{{ backup_export_repair_stage }}"
+            state: absent
+          when: not ansible_check_mode

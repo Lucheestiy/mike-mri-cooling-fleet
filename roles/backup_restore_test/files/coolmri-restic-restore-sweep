@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+TARGETS="${COOLMRI_RESTIC_TARGETS:-/etc/restic-pi-backup-targets.psv}"
+VERIFIER="${COOLMRI_RESTORE_VERIFIER:-/usr/local/sbin/coolmri-restic-restore-test}"
+BACKUP_LOCK="${COOLMRI_BACKUP_LOCK:-/run/restic-pi-pull-backup.lock}"
+export RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-/var/cache/coolmri-restic}"
+export GOMAXPROCS="${GOMAXPROCS:-2}"
+export GOMEMLIMIT="${GOMEMLIMIT:-2GiB}"
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Must run as root." >&2
+  exit 77
+fi
+if [[ ! -r "$TARGETS" || ! -x "$VERIFIER" ]]; then
+  echo "Target catalog or restore verifier unavailable." >&2
+  exit 66
+fi
+
+mkdir -p "$RESTIC_CACHE_DIR"
+exec 8>"$BACKUP_LOCK"
+if ! flock -n 8; then
+  echo "Pi backup is active; restore sweep will not overlap it." >&2
+  exit 75
+fi
+
+failures=()
+count=0
+while IFS="|" read -r repository _; do
+  [[ -n "${repository:-}" ]] || continue
+  ((count += 1))
+  if ! "$VERIFIER" "$repository"; then
+    failures+=("$repository")
+  fi
+done <"$TARGETS"
+
+if ((count == 0)); then
+  echo "No configured repositories found." >&2
+  exit 67
+fi
+if ((${#failures[@]})); then
+  printf 'Restore sweep failures:' >&2
+  printf ' %s' "${failures[@]}" >&2
+  printf '\n' >&2
+  exit 1
+fi
+
+echo "Restore sweep succeeded for $count configured repositories."

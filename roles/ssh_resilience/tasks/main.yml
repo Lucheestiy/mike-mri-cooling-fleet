@@ -1,0 +1,128 @@
+---
+- name: Require the explicitly reviewed nearby pilot
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'agcmr3'
+      - ssh_resilience_port | int == 2222
+      - ssh_resilience_tailscale_ipv4 == ansible_host
+      - ansible_check_mode or ssh_resilience_confirm | bool
+    fail_msg: >-
+      This role is restricted to the nearby AGC/GMC MR3 pilot. Run check mode
+      first, then set ssh_resilience_confirm=true.
+
+- name: Read the node's current Tailscale IPv4 address
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - ip
+      - -4
+  register: ssh_resilience_tailscale_ip
+  changed_when: false
+  check_mode: false
+
+- name: Require the inventory and live Tailscale addresses to match
+  ansible.builtin.assert:
+    that:
+      - ssh_resilience_tailscale_ip.stdout_lines == [ssh_resilience_tailscale_ipv4]
+
+- name: Inspect pilot-managed paths before installation
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/systemd/system/ssh.socket.d/coolmri-openssh-rescue.conf
+    - /etc/systemd/system/coolmri-sshd-health.service
+    - /etc/systemd/system/coolmri-sshd-health.timer
+    - /usr/local/sbin/coolmri-sshd-health
+  register: ssh_resilience_existing_paths
+
+- name: Refuse to overwrite an unidentified prior pilot
+  ansible.builtin.assert:
+    that:
+      - ssh_resilience_existing_paths.results | map(attribute='stat.exists') | select('equalto', true) | list | length == 0
+    fail_msg: Existing SSH-resilience files require review before this first pilot.
+  when: not (ssh_resilience_allow_existing | default(false) | bool)
+
+- name: Create the ssh.socket drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/ssh.socket.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the Tailscale-only ordinary OpenSSH listener
+  ansible.builtin.template:
+    src: coolmri-openssh-rescue.conf.j2
+    dest: /etc/systemd/system/ssh.socket.d/coolmri-openssh-rescue.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the bounded SSH banner health helper
+  ansible.builtin.copy:
+    src: coolmri-sshd-health
+    dest: /usr/local/sbin/coolmri-sshd-health
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /bin/bash -n %s
+
+- name: Install the SSH health service
+  ansible.builtin.template:
+    src: coolmri-sshd-health.service.j2
+    dest: /etc/systemd/system/coolmri-sshd-health.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the SSH health timer
+  ansible.builtin.copy:
+    src: coolmri-sshd-health.timer
+    dest: /etc/systemd/system/coolmri-sshd-health.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Validate the unchanged OpenSSH daemon configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  check_mode: false
+
+- name: Activate the dual listener
+  when: not ansible_check_mode
+  block:
+    - name: Reload systemd units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Rebuild the OpenSSH socket listener
+      ansible.builtin.systemd_service:
+        name: ssh.service
+        state: stopped
+
+    - name: Restart the OpenSSH socket
+      ansible.builtin.systemd_service:
+        name: ssh.socket
+        state: restarted
+        enabled: true
+
+    - name: Start the OpenSSH service
+      ansible.builtin.systemd_service:
+        name: ssh.service
+        state: started
+        enabled: true
+
+    - name: Enable the bounded SSH health timer
+      ansible.builtin.systemd_service:
+        name: coolmri-sshd-health.timer
+        state: started
+        enabled: true
+
+    - name: Prove both ordinary OpenSSH banner paths locally
+      ansible.builtin.command: /usr/local/sbin/coolmri-sshd-health
+      environment:
+        COOLMRI_SSH_RESCUE_HOST: "{{ ssh_resilience_tailscale_ipv4 }}"
+        COOLMRI_SSH_RESCUE_PORT: "{{ ssh_resilience_port | string }}"
+        COOLMRI_SSH_FAILURE_LIMIT: "3"
+        COOLMRI_SSH_RESTART_COOLDOWN_SECONDS: "900"
+      changed_when: false

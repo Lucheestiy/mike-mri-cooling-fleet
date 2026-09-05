@@ -1,0 +1,27 @@
+[Unit]
+Description=CV Equipment Room Temperature Sensor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ cv_sensor_service_user }}
+Group={{ cv_sensor_service_group }}
+WorkingDirectory=/opt/cv-room-monitor
+ExecStart=/opt/cv-room-monitor/venv/bin/python /opt/cv-room-monitor/src/cv_room_sensor.py
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

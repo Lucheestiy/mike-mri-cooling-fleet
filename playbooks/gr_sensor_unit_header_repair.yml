@@ -1,0 +1,275 @@
+---
+- name: Remove the ignored MRI service header without changing behavior
+  hosts: "{{ mri_unit_repair_hosts | default('gr') }}"
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    mri_unit_repair_confirm: false
+    mri_unit_repair_allowed_hosts:
+      - gr
+      - glh
+    mri_unit_repair_site_ids:
+      gr: GR
+      glh: GLH
+    mri_unit_repair_repositories:
+      gr: gr
+      glh: glh
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    mri_unit_path: /etc/systemd/system/mri-sensor.service
+    mri_app_path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+    mri_helper_path: /usr/local/sbin/mri-sensor-service
+    mri_site_id: "{{ mri_unit_repair_site_ids[inventory_hostname] }}"
+    mri_backup_repository: "{{ mri_unit_repair_repositories[inventory_hostname] }}"
+
+  pre_tasks:
+    - name: Require explicit one-host confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or mri_unit_repair_confirm | bool
+          - inventory_hostname in mri_unit_repair_allowed_hosts
+          - ansible_play_hosts_all | length == 1
+          - ansible_play_batch | length == 1
+        fail_msg: >-
+          Run --check first, then pass -e mri_unit_repair_confirm=true.
+          This workflow removes only the known ignored first line and does not
+          restart or reboot the sensor Pi.
+
+    - name: Load current backup evidence
+      ansible.builtin.set_fact:
+        backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select host backup and restore activity
+      ansible.builtin.set_fact:
+        mri_backup_status: >-
+          {{ backup_evidence.repository_status
+             | selectattr('repository', 'equalto', mri_backup_repository)
+             | list | first | default({}) }}
+        mri_restore_status: >-
+          {{ backup_evidence.restore_tests
+             | selectattr('repository', 'equalto', mri_backup_repository)
+             | list | first | default({}) }}
+
+    - name: Require successful recent backup evidence
+      ansible.builtin.assert:
+        that:
+          - backup_evidence.batch.timer_active | bool
+          - mri_backup_status.activity_recent | default(false) | bool
+          - >-
+            backup_evidence.batch.result == 'success'
+            or (mri_restore_status.status | default('') == 'success'
+                and mri_restore_status.recent | default(false) | bool)
+
+    - name: Preserve exact service unit for rollback
+      ansible.builtin.slurp:
+        src: "{{ mri_unit_path }}"
+      register: mri_prior_unit
+
+    - name: Require the exact known stray header
+      ansible.builtin.assert:
+        that:
+          - (mri_prior_unit.content | b64decode).startswith('Ini, TOML\n[Unit]\n')
+          - (mri_prior_unit.content | b64decode).count('Ini, TOML') == 1
+
+    - name: Record application checksum
+      ansible.builtin.stat:
+        path: "{{ mri_app_path }}"
+        checksum_algorithm: sha256
+      register: mri_app_before
+
+    - name: Record exact probe set
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: mri_probes_before
+
+    - name: Require active service and five probes
+      ansible.builtin.assert:
+        that:
+          - mri_app_before.stat.exists
+          - mri_probes_before.matched | int == 5
+
+    - name: Verify sensor service is active before repair
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Record effective service properties
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - mri-sensor.service
+          - -p
+          - User
+          - -p
+          - Group
+          - -p
+          - ExecStart
+          - -p
+          - WorkingDirectory
+          - -p
+          - Restart
+          - -p
+          - RestartUSec
+          - --no-pager
+      register: mri_service_before
+      changed_when: false
+      check_mode: false
+
+    - name: Capture current MRI telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: mri_telemetry_before_response
+
+    - name: Select current MRI telemetry
+      ansible.builtin.set_fact:
+        mri_telemetry_before: >-
+          {{ mri_telemetry_before_response.json
+             | selectattr('id', 'equalto', mri_site_id)
+             | list | first | default({}) }}
+
+    - name: Require current MRI telemetry
+      ansible.builtin.assert:
+        that:
+          - mri_telemetry_before.id | default('') == mri_site_id
+          - not (mri_telemetry_before.is_offline | default(true) | bool)
+          - mri_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Repair and verify the ignored header transactionally
+      block:
+        - name: Remove only the exact ignored header line
+          ansible.builtin.lineinfile:
+            path: "{{ mri_unit_path }}"
+            regexp: '^Ini, TOML$'
+            state: absent
+            owner: root
+            group: root
+            mode: "0644"
+          register: mri_unit_change
+
+        - name: Verify repaired unit syntax
+          ansible.builtin.command:
+            argv: [systemd-analyze, verify, "{{ mri_unit_path }}"]
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Reload systemd metadata without restarting the sensor
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when:
+            - not ansible_check_mode
+            - mri_unit_change.changed
+
+        - name: Read post-repair effective service properties
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - show
+              - mri-sensor.service
+              - -p
+              - User
+              - -p
+              - Group
+              - -p
+              - ExecStart
+              - -p
+              - WorkingDirectory
+              - -p
+              - Restart
+              - -p
+              - RestartUSec
+              - --no-pager
+          register: mri_service_after
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Prove effective service behavior is unchanged
+          ansible.builtin.assert:
+            that:
+              - mri_service_after.stdout == mri_service_before.stdout
+          when: not ansible_check_mode
+
+        - name: Verify sensor service remains active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+          check_mode: false
+          when: not ansible_check_mode
+
+        - name: Recheck application checksum
+          ansible.builtin.stat:
+            path: "{{ mri_app_path }}"
+            checksum_algorithm: sha256
+          register: mri_app_after
+          when: not ansible_check_mode
+
+        - name: Recheck exact probe set
+          ansible.builtin.find:
+            paths: /sys/bus/w1/devices
+            patterns: "28-*"
+            file_type: link
+            recurse: false
+          register: mri_probes_after
+          when: not ansible_check_mode
+
+        - name: Require unchanged application and probes
+          ansible.builtin.assert:
+            that:
+              - mri_app_after.stat.checksum == mri_app_before.stat.checksum
+              - mri_probes_after.files | map(attribute='path') | map('basename') | sort == mri_probes_before.files | map(attribute='path') | map('basename') | sort
+          when: not ansible_check_mode
+
+        - name: Wait for MRI telemetry to advance without a service restart
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: mri_telemetry_after_response
+          until: >-
+            ((mri_telemetry_after_response.json
+              | selectattr('id', 'equalto', mri_site_id)
+              | list | first | default({})).last_updated | default(0) | int)
+            > (mri_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Restore exact prior unit
+          ansible.builtin.copy:
+            content: "{{ mri_prior_unit.content | b64decode }}"
+            dest: "{{ mri_unit_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Reload restored unit metadata
+          ansible.builtin.systemd:
+            daemon_reload: true
+
+        - name: Verify sensor remains active after rollback
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop after exact rollback
+          ansible.builtin.fail:
+            msg: >-
+              {{ inventory_hostname }} unit header repair failed; the original
+              unit was restored without restarting the sensor.

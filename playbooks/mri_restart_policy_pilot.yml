@@ -1,0 +1,460 @@
+---
+- name: Apply resilient MRI sensor restart policy to one allowlisted host without restart
+  hosts: "{{ mri_restart_policy_hosts | default('agcmr1') }}"
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    mri_restart_policy_confirm: false
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    mri_service_name: mri-sensor.service
+    mri_helper_path: /usr/local/sbin/mri-sensor-service
+    mri_dropin_dir: /etc/systemd/system/mri-sensor.service.d
+    mri_dropin_path: /etc/systemd/system/mri-sensor.service.d/10-restart-policy.conf
+    mri_app_path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+    mri_site_ids:
+      agcmr1: AGCMR1
+      agcmr2: GMCMR2
+      agcmr3: AGCMR3
+      gbh: GBHAera
+      gcmcsola: GCMCSola
+      gswbsola: GSWBSola
+      jsmr: JerseyShoreMR
+      oswmr1: OSWMR1
+      oswmr2: OSWMR2
+      pittstonsola: PittstonSola
+      pittstonvida: PittstonVida
+      shmr: SHMR
+      svimr1: SVIMR1
+      gr: GR
+      glh: GLH
+    mri_backup_repositories:
+      agcmr1: agcmr1
+      agcmr2: agcmr2
+      agcmr3: agcmr3
+      gbh: gbh
+      gcmcsola: gcmc-sola
+      gswbsola: gswb-sola
+      jsmr: jsmr
+      oswmr1: oswmr1
+      oswmr2: oswmr2nvme
+      pittstonsola: pittston-sola
+      pittstonvida: pittston-vida
+      shmr: shmr
+      svimr1: svimr1
+      gr: gr
+      glh: glh
+    mri_expected_probe_counts:
+      agcmr2: 4
+    mri_initial_restart_policies:
+      default:
+        restart: always
+        restart_usec: 100ms
+        start_limit_interval_usec: 10s
+        start_limit_burst: "5"
+      agcmr2:
+        restart: on-failure
+        restart_usec: 5s
+        start_limit_interval_usec: 10s
+        start_limit_burst: "5"
+    mri_site_id: "{{ mri_site_ids[inventory_hostname] }}"
+    mri_expected_probe_count: "{{ mri_expected_probe_counts.get(inventory_hostname, 5) }}"
+    mri_initial_restart_policy: >-
+      {{ mri_initial_restart_policies.get(
+           inventory_hostname, mri_initial_restart_policies['default']) }}
+    mri_target_sha256: 0d939f88b35ab8167ce1e70d91a8611a14f4a6a9631a30677bbe06bb5234a36f
+    mri_normalized_hash_code: |
+      import hashlib
+      import pathlib
+      import sys
+
+      payload = pathlib.Path(sys.argv[1]).read_bytes()
+      payload = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+      normalized = b"\n".join(line.rstrip() for line in payload.split(b"\n"))
+      print(hashlib.sha256(normalized).hexdigest())
+
+  pre_tasks:
+    - name: Require explicit allowlisted one-host confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or mri_restart_policy_confirm | bool
+          - inventory_hostname in mri_site_ids
+          - inventory_hostname in mri_backup_repositories
+          - ansible_play_hosts_all | length == 1
+          - ansible_play_batch | length == 1
+        fail_msg: >-
+          Run --check first, then pass -e mri_restart_policy_confirm=true.
+          This installs one reversible systemd drop-in and does not restart or
+          reboot the sensor Pi.
+
+    - name: Load current backup evidence
+      ansible.builtin.set_fact:
+        backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select current host backup activity
+      ansible.builtin.set_fact:
+        mri_backup_status: >-
+          {{ backup_evidence.repository_status
+             | selectattr('repository', 'equalto', mri_backup_repositories[inventory_hostname])
+             | list | first | default({}) }}
+        mri_restore_status: >-
+          {{ backup_evidence.restore_tests
+             | selectattr('repository', 'equalto', mri_backup_repositories[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require successful recent backup evidence
+      ansible.builtin.assert:
+        that:
+          - backup_evidence.batch.timer_active | bool
+          - mri_backup_status.activity_recent | default(false) | bool
+          - >-
+            backup_evidence.batch.result == 'success'
+            or (mri_restore_status.status | default('') == 'success'
+                and mri_restore_status.recent | default(false) | bool)
+
+    - name: Read live default-route Wi-Fi signal or wired state
+      ansible.builtin.shell: |
+        set -o pipefail
+        interface="$(ip route show default | awk 'NR == 1 {for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+        test -n "$interface"
+        if [ ! -d "/sys/class/net/$interface/wireless" ]; then
+          printf '0\n'
+          exit 0
+        fi
+        if ! command -v iw >/dev/null 2>&1; then
+          printf 'unknown\n'
+          exit 0
+        fi
+        signal="$(iw dev "$interface" link | awk '/signal:/ {print int($2); found=1} END {if (!found) exit 1}')" || {
+          printf 'unknown\n'
+          exit 0
+        }
+        printf '%s\n' "$signal"
+      args:
+        executable: /bin/bash
+      register: mri_restart_wifi_signal
+      changed_when: false
+      check_mode: false
+
+    - name: Report marginal remote Wi-Fi as an advisory
+      ansible.builtin.debug:
+        msg: >-
+          Routed Wi-Fi is {{ mri_restart_wifi_signal.stdout }} dBm. Continue
+          because this transaction is byte-exact, automatically reversible,
+          and does not restart the sensor; retain Wi-Fi as a field advisory.
+      when:
+        - mri_restart_wifi_signal.stdout is match('^-?[0-9]+$')
+        - mri_restart_wifi_signal.stdout | int <= -67
+
+    - name: Report unavailable Wi-Fi signal tooling as an advisory
+      ansible.builtin.debug:
+        msg: >-
+          Routed Wi-Fi signal telemetry is unavailable. Continue because live
+          SSH, Tailscale, sensor, probe, telemetry, filesystem, and rollback
+          gates remain authoritative for this no-restart transaction.
+      when: mri_restart_wifi_signal.stdout == 'unknown'
+
+    - name: Require writable root and boot filesystems
+      ansible.builtin.shell: |
+        set -o pipefail
+        ! findmnt -n -o OPTIONS / | tr ',' '\n' | grep -qx ro
+        if mountpoint -q /boot/firmware; then
+          ! findmnt -n -o OPTIONS /boot/firmware | tr ',' '\n' | grep -qx ro
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Require idle package management
+      ansible.builtin.shell: >-
+        if systemctl is-active --quiet apt-daily-upgrade.service
+        || systemctl is-active --quiet apt-daily.service
+        || pgrep -x apt-get >/dev/null
+        || pgrep -x dpkg >/dev/null
+        || pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade$' >/dev/null;
+        then exit 1; fi
+      changed_when: false
+      check_mode: false
+
+    - name: Read live power and thermal throttle state
+      ansible.builtin.command:
+        argv: [sudo, -n, /usr/local/sbin/coolmri-pi-status]
+      become: false
+      register: mri_restart_hardware_status
+      changed_when: false
+      check_mode: false
+
+    - name: Require zero live throttle flags
+      ansible.builtin.assert:
+        that:
+          - "'throttled=throttled=0x0' in mri_restart_hardware_status.stdout"
+
+    - name: Inspect approved MRI application
+      ansible.builtin.stat:
+        path: "{{ mri_app_path }}"
+        checksum_algorithm: sha256
+      register: mri_app_before
+
+    - name: Compute behavior-preserving normalized application checksum
+      ansible.builtin.command:
+        argv: [python3, -c, "{{ mri_normalized_hash_code }}", "{{ mri_app_path }}"]
+      register: mri_app_normalized_before
+      changed_when: false
+      check_mode: false
+
+    - name: Record exact probe set
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: mri_probes_before
+
+    - name: Inspect any prior restart-policy drop-in
+      ansible.builtin.stat:
+        path: "{{ mri_dropin_path }}"
+      register: mri_prior_dropin_stat
+
+    - name: Preserve prior drop-in for rollback
+      ansible.builtin.slurp:
+        src: "{{ mri_dropin_path }}"
+      register: mri_prior_dropin
+      when: mri_prior_dropin_stat.stat.exists
+
+    - name: Verify active sensor service before pilot
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Record pre-pilot effective service properties
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ mri_service_name }}"
+          - -p
+          - MainPID
+          - -p
+          - ActiveEnterTimestampMonotonic
+          - -p
+          - User
+          - -p
+          - ExecStart
+          - -p
+          - Restart
+          - -p
+          - RestartUSec
+          - -p
+          - StartLimitIntervalUSec
+          - -p
+          - StartLimitBurst
+          - --no-pager
+      register: mri_service_before
+      changed_when: false
+      check_mode: false
+
+    - name: Parse pre-pilot service properties
+      ansible.builtin.set_fact:
+        mri_service_before_map: >-
+          {{ dict(mri_service_before.stdout_lines
+             | map('split', '=', 1)
+             | map('first')
+             | zip(mri_service_before.stdout_lines
+             | map('split', '=', 1)
+             | map('last'))) }}
+
+    - name: Require the exact known per-host legacy restart policy
+      ansible.builtin.assert:
+        that:
+          - mri_app_normalized_before.stdout == mri_target_sha256
+          - mri_probes_before.matched | int == mri_expected_probe_count | int
+          - mri_service_before_map.User == ansible_user
+          - mri_service_before_map.Restart == mri_initial_restart_policy.restart
+          - mri_service_before_map.RestartUSec == mri_initial_restart_policy.restart_usec
+          - mri_service_before_map.StartLimitIntervalUSec == mri_initial_restart_policy.start_limit_interval_usec
+          - mri_service_before_map.StartLimitBurst == mri_initial_restart_policy.start_limit_burst
+
+    - name: Capture current MRI telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: mri_telemetry_before_response
+
+    - name: Select current MRI telemetry
+      ansible.builtin.set_fact:
+        mri_telemetry_before: >-
+          {{ mri_telemetry_before_response.json
+             | selectattr('id', 'equalto', mri_site_id)
+             | list | first | default({}) }}
+
+    - name: Require current MRI telemetry
+      ansible.builtin.assert:
+        that:
+          - mri_telemetry_before.id | default('') == mri_site_id
+          - not (mri_telemetry_before.is_offline | default(true) | bool)
+          - mri_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Install and verify restart-policy drop-in transactionally
+      block:
+        - name: Ensure systemd drop-in directory exists
+          ansible.builtin.file:
+            path: "{{ mri_dropin_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Install bounded restart policy
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../roles/temp_sensors/files/mri-sensor-restart-policy.conf"
+            dest: "{{ mri_dropin_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+          register: mri_restart_policy_change
+
+        - name: Validate complete MRI service unit
+          ansible.builtin.command:
+            argv: [systemd-analyze, verify, /etc/systemd/system/mri-sensor.service]
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Reload metadata without restarting sensor
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when:
+            - not ansible_check_mode
+            - mri_restart_policy_change.changed
+
+        - name: Record post-pilot effective service properties
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - show
+              - "{{ mri_service_name }}"
+              - -p
+              - MainPID
+              - -p
+              - ActiveEnterTimestampMonotonic
+              - -p
+              - User
+              - -p
+              - ExecStart
+              - -p
+              - Restart
+              - -p
+              - RestartUSec
+              - -p
+              - StartLimitIntervalUSec
+              - -p
+              - StartLimitBurst
+              - --no-pager
+          register: mri_service_after
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Parse post-pilot service properties
+          ansible.builtin.set_fact:
+            mri_service_after_map: >-
+              {{ dict(mri_service_after.stdout_lines
+                 | map('split', '=', 1)
+                 | map('first')
+                 | zip(mri_service_after.stdout_lines
+                 | map('split', '=', 1)
+                 | map('last'))) }}
+          when: not ansible_check_mode
+
+        - name: Prove service never restarted and new fallback is effective
+          ansible.builtin.assert:
+            that:
+              - mri_service_after_map.MainPID == mri_service_before_map.MainPID
+              - mri_service_after_map.ActiveEnterTimestampMonotonic == mri_service_before_map.ActiveEnterTimestampMonotonic
+              - mri_service_after_map.User == mri_service_before_map.User
+              - ('/home/' ~ ansible_user ~ '/mike-mri-cooling/venv/bin/python3') in mri_service_after_map.ExecStart
+              - ('/home/' ~ ansible_user ~ '/mike-mri-cooling/src/pi_sensor.py') in mri_service_after_map.ExecStart
+              - mri_service_after_map.Restart == 'always'
+              - mri_service_after_map.RestartUSec == '15s'
+              - mri_service_after_map.StartLimitIntervalUSec == '0'
+          when: not ansible_check_mode
+
+        - name: Verify sensor service remains active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+          check_mode: false
+          when: not ansible_check_mode
+
+        - name: Recheck application checksum and probes
+          block:
+            - ansible.builtin.stat:
+                path: "{{ mri_app_path }}"
+                checksum_algorithm: sha256
+              register: mri_app_after
+            - ansible.builtin.find:
+                paths: /sys/bus/w1/devices
+                patterns: "28-*"
+                file_type: link
+                recurse: false
+              register: mri_probes_after
+            - ansible.builtin.assert:
+                that:
+                  - mri_app_after.stat.checksum == mri_app_before.stat.checksum
+                  - mri_probes_after.files | map(attribute='path') | map('basename') | sort == mri_probes_before.files | map(attribute='path') | map('basename') | sort
+          when: not ansible_check_mode
+
+        - name: Wait for MRI telemetry to advance without restart
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: mri_telemetry_after_response
+          until: >-
+            ((mri_telemetry_after_response.json
+              | selectattr('id', 'equalto', mri_site_id)
+              | list | first | default({})).last_updated | default(0) | int)
+            > (mri_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Restore prior restart policy when it existed
+          ansible.builtin.copy:
+            content: "{{ mri_prior_dropin.content | b64decode }}"
+            dest: "{{ mri_dropin_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+          when: mri_prior_dropin_stat.stat.exists
+
+        - name: Remove newly added restart policy when none existed
+          ansible.builtin.file:
+            path: "{{ mri_dropin_path }}"
+            state: absent
+          when: not mri_prior_dropin_stat.stat.exists
+
+        - name: Reload rolled-back systemd metadata
+          ansible.builtin.systemd:
+            daemon_reload: true
+
+        - name: Verify service remains active after rollback
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ mri_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop after exact rollback
+          ansible.builtin.fail:
+            msg: MRI restart-policy pilot failed; prior metadata was restored without restarting the sensor.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Surge Uploader periodically (user)
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+Unit=surge-monitor.service
+
+[Install]
+WantedBy=timers.target
+

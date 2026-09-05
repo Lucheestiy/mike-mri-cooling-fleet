@@ -42,7 +42,7 @@ camera_edge:
   image_width: 1920
   image_height: 1080
   upload_enabled: true
-  upload_mode: full_and_crop
+  upload_mode: cropped_only
   ocr_crop_coords:
     x: 708
     y: 520

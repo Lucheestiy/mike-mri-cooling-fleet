@@ -1,0 +1,308 @@
+- name: Apply and verify nearby profile-specific volatile-journal pilots
+  hosts: agcmr3:gmcir3:gmcep1and2:gmcep3
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    volatile_journal_pilot_confirm: false
+    mri_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    sensor_helper_paths:
+      agcmr3: /usr/local/sbin/mri-sensor-service
+      gmcir3: /usr/local/sbin/cv-sensor-service
+      gmcep1and2: /usr/local/sbin/cv-sensor-service
+      gmcep3: /usr/local/sbin/cv-sensor-service
+    sensor_program_paths:
+      agcmr3: /home/agcmr3/mike-mri-cooling/src/pi_sensor.py
+      gmcir3: /opt/cv-room-monitor/src/cv_room_sensor.py
+      gmcep1and2: /opt/cv-room-monitor/src/cv_room_sensor.py
+      gmcep3: /opt/cv-room-monitor/src/cv_room_sensor.py
+    expected_program_sha256:
+      agcmr3: 37b05296409aeb9421b1626d3784048181e66122bb951c73967b32c07f89320c
+      gmcir3: a7bb0bc02e548f37993345e54cd664ac4d6e3dc47ba0b5525d7402f3a07717aa
+      gmcep1and2: a7bb0bc02e548f37993345e54cd664ac4d6e3dc47ba0b5525d7402f3a07717aa
+      gmcep3: a7bb0bc02e548f37993345e54cd664ac4d6e3dc47ba0b5525d7402f3a07717aa
+    telemetry_urls:
+      agcmr3: https://coolmri.com/api/sites/snapshot
+      gmcir3: https://cv.coolmri.com/api/sites/snapshot
+      gmcep1and2: https://cv.coolmri.com/api/sites/snapshot
+      gmcep3: https://cv.coolmri.com/api/sites/snapshot
+    telemetry_site_ids:
+      agcmr3: AGCMR3
+      gmcir3: IR3
+      gmcep1and2: EP1and2
+      gmcep3: EP3
+    expected_probe_counts:
+      agcmr3: 5
+      gmcir3: 4
+      gmcep1and2: 5
+      gmcep3: 3
+    telemetry_required_fields:
+      agcmr3: [helium_in, helium_out, primary_in, primary_out]
+      gmcir3: [helium_in, helium_out, primary_in, primary_out]
+      gmcep1and2: [room_temp, helium_in, helium_out, primary_in, primary_out]
+      gmcep3: [helium_in, helium_out, primary_in]
+    edge_baseline_manage_timezone: false
+    edge_baseline_manage_time_sync: false
+    edge_baseline:
+      timezone: America/New_York
+      journal_storage: volatile
+      journal_system_max_use: 128M
+      journal_runtime_max_use: 32M
+      journal_max_file_sec: 1day
+      journal_max_retention_sec: 1day
+
+  pre_tasks:
+    - name: Require explicit nearby pilot confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or volatile_journal_pilot_confirm | bool
+          - ansible_play_batch | length == 1
+          - inventory_hostname in ['agcmr3', 'gmcir3', 'gmcep1and2', 'gmcep3']
+        fail_msg: >-
+          Run --check first, then pass
+          -e volatile_journal_pilot_confirm=true with an explicit one-host
+          --limit. Only the explicitly mapped backed nearby MRI/CV pilots are permitted.
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Load controller backup evidence
+      ansible.builtin.set_fact:
+        backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select this pilot host backup activity
+      ansible.builtin.set_fact:
+        host_backup_status: >-
+          {{ backup_evidence.repository_status
+             | selectattr('repository', 'equalto', inventory_hostname)
+             | list | first | default({}) }}
+
+    - name: Enforce successful recent backup gate
+      ansible.builtin.assert:
+        that:
+          - backup_evidence.batch.result == 'success'
+          - backup_evidence.batch.timer_active | bool
+          - host_backup_status.activity_recent | default(false) | bool
+
+    - name: Require package manager to be idle
+      ansible.builtin.shell: >-
+        if systemctl is-active --quiet apt-daily-upgrade.service
+        || systemctl is-active --quiet apt-daily.service
+        || pgrep -x apt-get >/dev/null
+        || pgrep -x dpkg >/dev/null
+        || pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade$' >/dev/null;
+        then exit 1; fi
+      changed_when: false
+      check_mode: false
+
+    - name: Confirm no pre-existing fleet journald override
+      ansible.builtin.stat:
+        path: /etc/systemd/journald.conf.d/60-coolmri-fleet.conf
+      register: prior_journal_policy
+
+    - name: Require exact-removal rollback state
+      ansible.builtin.assert:
+        that:
+          - not prior_journal_policy.stat.exists
+
+    - name: Count physical 1-Wire probes before pilot
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: physical_probes
+
+    - name: Require the expected physical probes
+      ansible.builtin.assert:
+        that:
+          - physical_probes.matched | int == expected_probe_counts[inventory_hostname]
+
+    - name: Capture canonical sensor application checksum
+      ansible.builtin.stat:
+        path: "{{ sensor_program_paths[inventory_hostname] }}"
+        checksum_algorithm: sha256
+      register: sensor_program_before
+
+    - name: Require approved application before journal change
+      ansible.builtin.assert:
+        that:
+          - sensor_program_before.stat.exists
+          - sensor_program_before.stat.checksum == expected_program_sha256[inventory_hostname]
+
+    - name: Verify site-account service identity
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ 'cv-room-sensor.service' if inventory_hostname.startswith('gmc') else 'mri-sensor.service' }}"
+          - -p
+          - User
+          - --value
+      changed_when: false
+      check_mode: false
+      register: sensor_service_user
+
+    - name: Require non-root site-account sensor service
+      ansible.builtin.assert:
+        that:
+          - sensor_service_user.stdout | trim == ansible_user
+
+    - name: Read sanitized throttle state before pilot
+      ansible.builtin.command:
+        argv: [sudo, -n, /usr/local/sbin/coolmri-pi-status]
+      become: false
+      changed_when: false
+      check_mode: false
+      register: pilot_status_before
+
+    - name: Require zero current or historical throttle flags
+      ansible.builtin.assert:
+        that:
+          - "'throttled=0x0' in pilot_status_before.stdout"
+
+    - name: Verify sensor is active before pilot
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ sensor_helper_paths[inventory_hostname] }}", is-active]
+      become: false
+      check_mode: false
+      changed_when: false
+
+    - name: Capture profile telemetry before pilot
+      ansible.builtin.uri:
+        url: "{{ telemetry_urls[inventory_hostname] }}"
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: telemetry_before_response
+
+    - name: Select pre-pilot site telemetry
+      ansible.builtin.set_fact:
+        telemetry_before: >-
+          {{ telemetry_before_response.json
+             | selectattr('id', 'equalto', telemetry_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require current pre-pilot telemetry
+      ansible.builtin.assert:
+        that:
+          - telemetry_before.id | default('') == telemetry_site_ids[inventory_hostname]
+          - not (telemetry_before.is_offline | default(true) | bool)
+          - telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Apply and verify bounded volatile journald policy
+      block:
+        - name: Apply edge journald role
+          ansible.builtin.include_role:
+            name: edge_baseline
+
+        - name: Read effective journald policy
+          ansible.builtin.command: systemd-analyze cat-config systemd/journald.conf
+          changed_when: false
+          register: effective_journal_policy
+          when: not ansible_check_mode
+
+        - name: Prove volatile bounded policy is active
+          ansible.builtin.assert:
+            that:
+              - "'60-coolmri-fleet.conf' in effective_journal_policy.stdout"
+              - "'Storage=volatile' in effective_journal_policy.stdout"
+              - "'RuntimeMaxUse=32M' in effective_journal_policy.stdout"
+          when: not ansible_check_mode
+
+        - name: Verify sensor remains active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_paths[inventory_hostname] }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Prove sensor application checksum remained unchanged
+          ansible.builtin.stat:
+            path: "{{ sensor_program_paths[inventory_hostname] }}"
+            checksum_algorithm: sha256
+          register: sensor_program_after
+
+        - name: Require unchanged approved sensor program
+          ansible.builtin.assert:
+            that:
+              - sensor_program_after.stat.checksum == sensor_program_before.stat.checksum
+
+        - name: Wait for profile telemetry to advance
+          ansible.builtin.uri:
+            url: "{{ telemetry_urls[inventory_hostname] }}"
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: telemetry_after_response
+          until: >-
+            ((telemetry_after_response.json
+              | selectattr('id', 'equalto', telemetry_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+
+        - name: Select post-pilot site telemetry
+          ansible.builtin.set_fact:
+            telemetry_after: >-
+              {{ telemetry_after_response.json
+                 | selectattr('id', 'equalto', telemetry_site_ids[inventory_hostname])
+                 | list | first | default({}) }}
+          when: not ansible_check_mode
+
+        - name: Prove mapped telemetry remains live
+          ansible.builtin.assert:
+            that:
+              - not (telemetry_after.is_offline | default(true) | bool)
+              - telemetry_after.last_updated | int > telemetry_before.last_updated | int
+          when: not ansible_check_mode
+
+        - name: Prove every required mapped reading remains numeric
+          ansible.builtin.assert:
+            that:
+              - telemetry_after[item] is number
+          loop: "{{ telemetry_required_fields[inventory_hostname] }}"
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Remove failed fleet journald pilot policy
+          ansible.builtin.include_role:
+            name: edge_baseline
+          vars:
+            edge_baseline_journal_policy_state: absent
+
+        - name: Verify sensor after rollback
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_paths[inventory_hostname] }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop after verified journald rollback
+          ansible.builtin.fail:
+            msg: >-
+              {{ inventory_hostname }} volatile-journal verification failed; the fleet policy was
+              removed, journald returned to the distribution policy, and the
+              sensor remained active.

@@ -1,0 +1,38 @@
+---
+- name: Resume cron immediately
+  ansible.builtin.command:
+    argv: [systemctl, start, cron.service]
+  when: not ansible_check_mode
+  changed_when: true
+
+- name: Disarm automatic cron resume watchdog
+  ansible.builtin.shell: |
+    systemctl stop '{{ camera_ram_logs_cron_watchdog_unit }}.timer' '{{ camera_ram_logs_cron_watchdog_unit }}.service' 2>/dev/null || true
+    systemctl reset-failed '{{ camera_ram_logs_cron_watchdog_unit }}.service' 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  when: not ansible_check_mode
+  changed_when: true
+
+- name: Re-read exact cron.d schedule metadata
+  ansible.builtin.stat:
+    path: "{{ camera_ram_logs_crond_path }}"
+    checksum_algorithm: sha256
+  register: camera_ram_logs_crond_after
+  check_mode: false
+
+- name: Verify cron resumed with untouched schedule
+  ansible.builtin.command:
+    argv: [systemctl, is-active, cron.service]
+  register: camera_ram_logs_cron_service_after
+  changed_when: false
+  check_mode: false
+
+- name: Prove exact cron.d preservation and active scheduler
+  ansible.builtin.assert:
+    that:
+      - camera_ram_logs_cron_service_after.stdout == 'active'
+      - camera_ram_logs_crond_after.stat.checksum == camera_ram_logs_crond_before.stat.checksum
+      - camera_ram_logs_crond_after.stat.mode == camera_ram_logs_crond_before.stat.mode
+      - camera_ram_logs_crond_after.stat.pw_name == camera_ram_logs_crond_before.stat.pw_name
+      - camera_ram_logs_crond_after.stat.gr_name == camera_ram_logs_crond_before.stat.gr_name

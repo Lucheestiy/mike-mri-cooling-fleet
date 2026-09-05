@@ -1,0 +1,11 @@
+---
+- name: Validate camera RAM-log role inputs
+  ansible.builtin.assert:
+    that:
+      - mri_user is defined
+      - mri_user | length > 0
+      - camera_ram_logs_state in ['apply', 'rollback']
+      - camera_ram_logs_schedule_strategy in ['user_crontab', 'cron_service_watchdog']
+
+- name: Run selected camera RAM-log operation
+  ansible.builtin.include_tasks: "{{ camera_ram_logs_state }}.yml"

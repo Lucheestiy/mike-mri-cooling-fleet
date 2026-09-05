@@ -7,7 +7,7 @@ JOURNALCTL="/usr/bin/journalctl"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: mri-sensor-service {status|is-active|start|stop|restart|logs [--since <when>] [--lines <count>]}
+Usage: mri-sensor-service {status|is-active|start|stop|restart|logs [--since <when>] [--lines <count>]|recent-logs}
 EOF
   exit 2
 }
@@ -73,6 +73,10 @@ main() {
     logs)
       shift
       run_logs "$@"
+      ;;
+    recent-logs)
+      [[ $# -eq 1 ]] || usage
+      run_logs --since "2 minutes ago" --lines 160
       ;;
     *)
       usage

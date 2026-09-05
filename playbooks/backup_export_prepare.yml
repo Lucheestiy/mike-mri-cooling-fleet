@@ -1,0 +1,202 @@
+- name: Prepare online backup-gap Pis for the existing hub pull workflow
+  hosts: agcmr2:gcmcmr2:vwm2:vwm3:glh
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    backup_export_prepare_confirm: false
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    backup_export_site_ids:
+      agcmr2: GMCMR2
+      gcmcmr2: GCMCMR2
+      vwm2: VWM2
+      vwm3: VWM3
+      glh: GLH
+    backup_export_expected_probes:
+      agcmr2: 4
+      gcmcmr2: 5
+      vwm2: 5
+      vwm3: 5
+      glh: 5
+
+  pre_tasks:
+    - name: Require explicit additive helper confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or backup_export_prepare_confirm | bool
+          - inventory_hostname in ['agcmr2', 'gcmcmr2', 'vwm2', 'vwm3', 'glh']
+        fail_msg: >-
+          Run --check first, then pass -e backup_export_prepare_confirm=true.
+          This installs only the fixed-path export helper and narrow sudo rule;
+          it does not claim that a backup exists.
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.local/bin"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Inspect sensor application before helper installation
+      ansible.builtin.stat:
+        path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+        checksum_algorithm: sha256
+      register: backup_export_app_before
+
+    - name: Count current physical probes
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: backup_export_probes_before
+
+    - name: Require active sensor and exact probe count
+      ansible.builtin.assert:
+        that:
+          - backup_export_app_before.stat.exists
+          - backup_export_probes_before.matched | int == backup_export_expected_probes[inventory_hostname]
+
+    - name: Verify MRI sensor is active before helper installation
+      ansible.builtin.command:
+        argv: [sudo, -n, /usr/local/sbin/mri-sensor-service, is-active]
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Capture current MRI telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: backup_export_telemetry_before_response
+
+    - name: Select pre-change site telemetry
+      ansible.builtin.set_fact:
+        backup_export_telemetry_before: >-
+          {{ backup_export_telemetry_before_response.json
+             | selectattr('id', 'equalto', backup_export_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require current pre-change telemetry
+      ansible.builtin.assert:
+        that:
+          - backup_export_telemetry_before.id | default('') == backup_export_site_ids[inventory_hostname]
+          - not (backup_export_telemetry_before.is_offline | default(true) | bool)
+          - backup_export_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Install and verify additive backup export preparation
+      block:
+        - name: Install restricted backup export role
+          ansible.builtin.include_role:
+            name: backup_export
+
+        - name: Verify helper through its narrow check action
+          ansible.builtin.command:
+            argv: [sudo, -n, /usr/local/sbin/pi-backup-export, check]
+          become: false
+          changed_when: false
+          check_mode: false
+          register: backup_export_check
+          when: not ansible_check_mode
+
+        - name: Require sanitized helper readiness response
+          ansible.builtin.assert:
+            that:
+              - "('backup-export-ready user=' ~ ansible_user ~ ' paths=') in backup_export_check.stdout"
+          when: not ansible_check_mode
+
+        - name: Prove sensor application checksum remains unchanged
+          ansible.builtin.stat:
+            path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+            checksum_algorithm: sha256
+          register: backup_export_app_after
+          when: not ansible_check_mode
+
+        - name: Require unchanged application and active sensor
+          ansible.builtin.assert:
+            that:
+              - backup_export_app_after.stat.checksum == backup_export_app_before.stat.checksum
+          when: not ansible_check_mode
+
+        - name: Verify MRI sensor remains active
+          ansible.builtin.command:
+            argv: [sudo, -n, /usr/local/sbin/mri-sensor-service, is-active]
+          become: false
+          changed_when: false
+          check_mode: false
+          when: not ansible_check_mode
+
+        - name: Wait for MRI telemetry to advance
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: backup_export_telemetry_after_response
+          until: >-
+            ((backup_export_telemetry_after_response.json
+              | selectattr('id', 'equalto', backup_export_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (backup_export_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Remove newly installed hub pull authorization
+          ansible.builtin.lineinfile:
+            path: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+            regexp: "mik-eq-pi-pull-backup$"
+            state: absent
+          become: false
+          when: backup_export_key_change.changed | default(false)
+
+        - name: Remove newly installed forced-command dispatcher
+          ansible.builtin.file:
+            path: /usr/local/sbin/pi-backup-ssh-dispatch
+            state: absent
+          when: backup_export_dispatcher_change.changed | default(false)
+
+        - name: Remove newly installed export sudo rule
+          ansible.builtin.file:
+            path: /etc/sudoers.d/pi-backup-export
+            state: absent
+          when: backup_export_sudoers_change.changed | default(false)
+
+        - name: Remove newly installed export helper
+          ansible.builtin.file:
+            path: /usr/local/sbin/pi-backup-export
+            state: absent
+          when: backup_export_helper_change.changed | default(false)
+
+        - name: Verify sensor after helper rollback
+          ansible.builtin.command:
+            argv: [sudo, -n, /usr/local/sbin/mri-sensor-service, is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop serial helper preparation after rollback
+          ansible.builtin.fail:
+            msg: >-
+              Backup export preparation failed on {{ inventory_hostname }};
+              newly added helper files were removed and the sensor is active.

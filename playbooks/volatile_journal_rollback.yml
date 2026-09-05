@@ -1,0 +1,152 @@
+---
+- name: Roll back one verified volatile-journal canary
+  hosts: agcmr1:agcmr3:gmcir3:gmcep1and2:gmcep3
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    volatile_journal_rollback_confirm: false
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    sensor_helper_paths:
+      agcmr1: /usr/local/sbin/mri-sensor-service
+      agcmr3: /usr/local/sbin/mri-sensor-service
+      gmcir3: /usr/local/sbin/cv-sensor-service
+      gmcep1and2: /usr/local/sbin/cv-sensor-service
+      gmcep3: /usr/local/sbin/cv-sensor-service
+    telemetry_urls:
+      agcmr1: https://coolmri.com/api/sites/snapshot
+      agcmr3: https://coolmri.com/api/sites/snapshot
+      gmcir3: https://cv.coolmri.com/api/sites/snapshot
+      gmcep1and2: https://cv.coolmri.com/api/sites/snapshot
+      gmcep3: https://cv.coolmri.com/api/sites/snapshot
+    telemetry_site_ids:
+      agcmr1: AGCMR1
+      agcmr3: AGCMR3
+      gmcir3: IR3
+      gmcep1and2: EP1and2
+      gmcep3: EP3
+    expected_probe_counts:
+      agcmr1: 5
+      agcmr3: 5
+      gmcir3: 4
+      gmcep1and2: 5
+      gmcep3: 3
+    edge_baseline_manage_timezone: false
+    edge_baseline_manage_time_sync: false
+    edge_baseline:
+      timezone: America/New_York
+      journal_storage: volatile
+      journal_system_max_use: 128M
+      journal_runtime_max_use: 32M
+      journal_max_file_sec: 1day
+      journal_max_retention_sec: 1day
+
+  pre_tasks:
+    - name: Require explicit one-host rollback confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or volatile_journal_rollback_confirm | bool
+          - ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          Use --limit for exactly one verified canary, run --check first, and
+          pass -e volatile_journal_rollback_confirm=true to remove its policy.
+
+    - name: Require the fleet journal policy to exist
+      ansible.builtin.stat:
+        path: /etc/systemd/journald.conf.d/60-coolmri-fleet.conf
+        checksum_algorithm: sha256
+      register: rollback_policy
+
+    - name: Refuse ambiguous rollback state
+      ansible.builtin.assert:
+        that:
+          - rollback_policy.stat.exists
+          - rollback_policy.stat.isreg
+
+    - name: Capture current telemetry before rollback
+      ansible.builtin.uri:
+        url: "{{ telemetry_urls[inventory_hostname] }}"
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: rollback_telemetry_before_response
+
+    - name: Select current site telemetry
+      ansible.builtin.set_fact:
+        rollback_telemetry_before: >-
+          {{ rollback_telemetry_before_response.json
+             | selectattr('id', 'equalto', telemetry_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require healthy telemetry before rollback
+      ansible.builtin.assert:
+        that:
+          - not (rollback_telemetry_before.is_offline | default(true) | bool)
+          - rollback_telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Remove policy and verify profile recovery
+      when: not ansible_check_mode
+      block:
+        - name: Remove only the fleet journald policy
+          ansible.builtin.include_role:
+            name: edge_baseline
+          vars:
+            edge_baseline_journal_policy_state: absent
+
+        - name: Verify sensor service remains active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_paths[inventory_hostname] }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Count physical probes after rollback
+          ansible.builtin.find:
+            paths: /sys/bus/w1/devices
+            patterns: "28-*"
+            file_type: link
+            recurse: false
+          register: rollback_probes
+
+        - name: Require exact probe recovery
+          ansible.builtin.assert:
+            that:
+              - rollback_probes.matched | int == expected_probe_counts[inventory_hostname]
+
+        - name: Wait for profile telemetry to advance
+          ansible.builtin.uri:
+            url: "{{ telemetry_urls[inventory_hostname] }}"
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: rollback_telemetry_after_response
+          until: >-
+            ((rollback_telemetry_after_response.json
+              | selectattr('id', 'equalto', telemetry_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (rollback_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+
+      rescue:
+        - name: Restore volatile policy after failed rollback verification
+          ansible.builtin.include_role:
+            name: edge_baseline
+          vars:
+            edge_baseline_journal_policy_state: present
+
+        - name: Verify sensor after policy restoration
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_paths[inventory_hostname] }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop after restoring the known canary state
+          ansible.builtin.fail:
+            msg: >-
+              Rollback verification failed; the bounded volatile policy was
+              restored and the sensor service remains active.

@@ -1,0 +1,27 @@
+---
+- name: Rehearse the OSW MR2 cron.d-preserving RAM-log strategy
+  hosts: oswmr2
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    ansible_become_exe: /home/oswmr2/.local/bin/sudo-rs-ansible-compat
+
+  pre_tasks:
+    - name: Refuse every non-check-mode invocation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode
+          - inventory_hostname == 'oswmr2'
+        fail_msg: >-
+          This playbook is a no-mutation rehearsal only. The production wave
+          remains proof-gated in camera_ram_logs_wave.yml.
+
+  tasks:
+    - name: Exercise cron watchdog strategy in check mode
+      ansible.builtin.include_role:
+        name: camera_ram_logs
+      vars:
+        mri_user: oswmr2
+        camera_ram_logs_state: apply
+        camera_ram_logs_schedule_strategy: cron_service_watchdog

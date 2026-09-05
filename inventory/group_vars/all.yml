@@ -16,23 +16,34 @@ temp_sensors:
   one_wire_gpio: true
   enable_service: true
   start_service: true
-  memory_only_mode: false
+  memory_only_mode: true
   wear_leveling: true
   ram_log_capacity: 1000
   disk_sync_interval: 3600
   enable_dual_streaming: false
 
 camera_edge:
-  capture_interval: 60
   image_width: 1920
   image_height: 1080
+  inter_capture_delay_sec: 2
   upload_enabled: true
   upload_mode: full_and_crop
   debug_save_images: true
-  calibration_mode: false
+  debug_retain_images: 20
+  retry_interval_sec: 300
+  retry_window_sec: 3600
+  retry_max_files: 20
+  retry_max_bytes: 134217728
+  http_timeout_sec: 180
+  http_attempts: 3
   install_cron: true
   scheduled_hours: [9, 15]
   retry_every_minutes: 5
+
+# Camera source recovered into the role predates every currently observed build.
+# Keep fleet-wide site runs from replacing working camera agents until a reviewed
+# canonical source and host-specific convergence plan are explicitly approved.
+camera_edge_deploy_approved: false
 
 pi_backup:
   enable_restricted_disk_backup: true
@@ -43,3 +54,8 @@ mri_sensor_service:
   enable_restricted_service_helper: true
   helper_path: /usr/local/sbin/mri-sensor-service
   sudoers_path: /etc/sudoers.d/mri-sensor-service
+
+pi_status:
+  enable_restricted_status_helper: true
+  helper_path: /usr/local/sbin/coolmri-pi-status
+  sudoers_path: /etc/sudoers.d/coolmri-pi-status

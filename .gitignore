@@ -11,3 +11,5 @@
 # Snapshots are for inspection only
 snapshots/
 reports/
+.env
+__pycache__/

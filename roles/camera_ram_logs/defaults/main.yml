@@ -1,0 +1,11 @@
+camera_ram_logs_state: apply
+camera_ram_logs_edge_dir: "/home/{{ mri_user }}/mri-cooling-camera/edge"
+camera_ram_logs_runtime_dir: "/run/coolmri-camera-logs/{{ mri_user }}"
+camera_ram_logs_archive_dir: "{{ camera_ram_logs_edge_dir }}/logs.persistent-before-ram"
+camera_ram_logs_rollback_capture_dir: "{{ camera_ram_logs_edge_dir }}/logs.ram-pilot-last"
+camera_ram_logs_crontab_state: "/var/lib/coolmri/camera-ram-logs-{{ mri_user }}.crontab"
+camera_ram_logs_scheduled_hours: "{{ camera_edge.scheduled_hours | default([9, 15]) }}"
+camera_ram_logs_retry_minutes: "{{ camera_edge.retry_every_minutes | default(5) }}"
+camera_ram_logs_schedule_strategy: user_crontab
+camera_ram_logs_crond_path: /etc/cron.d/mri-cooling-camera
+camera_ram_logs_cron_watchdog_unit: coolmri-camera-cron-auto-resume

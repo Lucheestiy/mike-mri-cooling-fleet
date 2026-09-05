@@ -1,0 +1,9 @@
+- name: Roll back CoolMRI fleet journal policy
+  hosts: pis
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    edge_baseline_journal_policy_state: absent
+  roles:
+    - role: edge_baseline

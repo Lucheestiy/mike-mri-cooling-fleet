@@ -1,0 +1,16 @@
+[Unit]
+Description=CoolMRI OpenSSH banner health check and bounded recovery
+After=ssh.socket ssh.service tailscaled.service
+Wants=ssh.socket tailscaled.service
+
+[Service]
+Type=oneshot
+Environment="COOLMRI_SSH_RESCUE_HOST={{ ssh_resilience_tailscale_ipv4 }}"
+Environment="COOLMRI_SSH_RESCUE_PORT={{ ssh_resilience_port }}"
+Environment="COOLMRI_SSH_FAILURE_LIMIT=3"
+Environment="COOLMRI_SSH_RESTART_COOLDOWN_SECONDS=900"
+ExecStart=/usr/local/sbin/coolmri-sshd-health
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full

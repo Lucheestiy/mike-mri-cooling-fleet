@@ -1,0 +1,78 @@
+---
+- name: Verify required restore-test commands exist
+  ansible.builtin.command: "which {{ item }}"
+  check_mode: false
+  changed_when: false
+  loop:
+    - restic
+    - jq
+    - tar
+    - flock
+
+- name: Install restore-test helper
+  ansible.builtin.copy:
+    src: coolmri-restic-restore-test
+    dest: /usr/local/sbin/coolmri-restic-restore-test
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create restore-test report directory
+  ansible.builtin.file:
+    path: "{{ backup_restore_test_report_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create dedicated Restic verification cache
+  ansible.builtin.file:
+    path: /var/cache/coolmri-restic
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install serial restore-sweep helper
+  ansible.builtin.copy:
+    src: coolmri-restic-restore-sweep
+    dest: /usr/local/sbin/coolmri-restic-restore-sweep
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /bin/bash -n %s
+
+- name: Install restore-sweep systemd units
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - coolmri-restic-restore-sweep.service
+    - coolmri-restic-restore-sweep.timer
+  register: backup_restore_sweep_units
+
+- name: Reload systemd after restore-sweep unit changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - backup_restore_sweep_units.changed
+    - not ansible_check_mode
+
+- name: Enable the weekly restore sweep
+  ansible.builtin.systemd_service:
+    name: coolmri-restic-restore-sweep.timer
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Install narrow restore-test sudo rule
+  ansible.builtin.template:
+    src: coolmri-restic-restore-test.sudoers.j2
+    dest: /etc/sudoers.d/coolmri-restic-restore-test
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s

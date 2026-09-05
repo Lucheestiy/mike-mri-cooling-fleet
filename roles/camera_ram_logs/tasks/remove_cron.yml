@@ -1,0 +1,46 @@
+---
+- name: Capture the exact camera-user crontab
+  ansible.builtin.command:
+    argv: [crontab, -u, "{{ mri_user }}", -l]
+  register: camera_ram_logs_crontab_before
+  changed_when: false
+  failed_when: camera_ram_logs_crontab_before.rc not in [0, 1]
+  check_mode: false
+
+- name: Ensure persistent pilot-state directory exists
+  ansible.builtin.file:
+    path: "{{ camera_ram_logs_crontab_state | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: not ansible_check_mode
+
+- name: Preserve the exact crontab for automatic restoration
+  ansible.builtin.copy:
+    dest: "{{ camera_ram_logs_crontab_state }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: "{{ camera_ram_logs_crontab_before.stdout }}\n"
+  when: not ansible_check_mode
+
+- name: Pause only camera capture and retry schedules
+  ansible.builtin.shell: >-
+    awk '!/run_scheduled_capture\.sh|run_retry_check\.sh/'
+    {{ camera_ram_logs_crontab_state | quote }} |
+    crontab -u {{ mri_user | quote }} -
+  args:
+    executable: /bin/bash
+  when: not ansible_check_mode
+  changed_when: true
+
+- name: Wait for any active camera wrapper to finish
+  ansible.builtin.shell: >-
+    timeout 120 bash -c 'while pgrep -u {{ mri_user | quote }} -f
+    "run_(scheduled_capture|retry_check)\\.sh|scheduled_capture\\.py|retry_failed_sessions\\.py"
+    >/dev/null; do sleep 2; done'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  check_mode: false

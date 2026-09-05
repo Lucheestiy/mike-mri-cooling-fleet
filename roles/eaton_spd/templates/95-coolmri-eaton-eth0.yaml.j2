@@ -1,0 +1,22 @@
+network:
+  version: 2
+  ethernets:
+    {{ eaton_spd_interface }}:
+      renderer: NetworkManager
+      match:
+        macaddress: "{{ eaton_spd_interface_mac }}"
+      set-name: "{{ eaton_spd_interface }}"
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - "{{ eaton_spd_pi_address }}"
+      link-local: []
+      networkmanager:
+        uuid: "{{ eaton_spd_connection_uuid }}"
+        name: "netplan-{{ eaton_spd_interface }}"
+        passthrough:
+          connection.wait-device-timeout: "0"
+          ipv4.never-default: "true"
+          ipv6.never-default: "true"
+          proxy._: ""
+

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+loopback_host="${COOLMRI_SSH_LOOPBACK_HOST:-127.0.0.1}"
+loopback_port="${COOLMRI_SSH_LOOPBACK_PORT:-22}"
+rescue_host="${COOLMRI_SSH_RESCUE_HOST:?COOLMRI_SSH_RESCUE_HOST is required}"
+rescue_port="${COOLMRI_SSH_RESCUE_PORT:-2222}"
+failure_limit="${COOLMRI_SSH_FAILURE_LIMIT:-3}"
+cooldown_seconds="${COOLMRI_SSH_RESTART_COOLDOWN_SECONDS:-900}"
+state_dir=/run/coolmri-sshd-health
+failure_file="$state_dir/consecutive-failures"
+restart_file="$state_dir/last-restart-epoch"
+
+for value in "$loopback_port" "$rescue_port" "$failure_limit" "$cooldown_seconds"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    logger -p authpriv.err -t coolmri-sshd-health "invalid numeric configuration"
+    exit 2
+  }
+done
+((loopback_port >= 1 && loopback_port <= 65535))
+((rescue_port >= 1 && rescue_port <= 65535))
+((failure_limit >= 1))
+
+mkdir -p "$state_dir"
+chmod 0700 "$state_dir"
+
+probe_banner() {
+  local host="$1" port="$2"
+  timeout 6 bash -c '
+    exec 3<>"/dev/tcp/$1/$2"
+    IFS= read -r -t 5 banner <&3
+    [[ "$banner" == SSH-* ]]
+  ' _ "$host" "$port"
+}
+
+healthy() {
+  probe_banner "$loopback_host" "$loopback_port" &&
+    probe_banner "$rescue_host" "$rescue_port"
+}
+
+if healthy; then
+  rm -f "$failure_file"
+  exit 0
+fi
+
+failures=0
+if [[ -r "$failure_file" ]]; then
+  read -r failures <"$failure_file" || failures=0
+  [[ "$failures" =~ ^[0-9]+$ ]] || failures=0
+fi
+((failures += 1))
+printf '%s\n' "$failures" >"$failure_file"
+logger -p authpriv.warning -t coolmri-sshd-health \
+  "SSH banner probe failed (${failures}/${failure_limit})"
+
+if ((failures < failure_limit)); then
+  exit 0
+fi
+
+now="$(date +%s)"
+last_restart=0
+if [[ -r "$restart_file" ]]; then
+  read -r last_restart <"$restart_file" || last_restart=0
+  [[ "$last_restart" =~ ^[0-9]+$ ]] || last_restart=0
+fi
+if ((now - last_restart < cooldown_seconds)); then
+  logger -p authpriv.warning -t coolmri-sshd-health \
+    "SSH restart suppressed by ${cooldown_seconds}s cooldown"
+  exit 0
+fi
+
+# ssh.service owns this volatile directory through RuntimeDirectory=sshd, so it
+# can legitimately be absent after a complete service stop.
+install -d -o root -g root -m 0755 /run/sshd
+if ! /usr/sbin/sshd -t; then
+  logger -p authpriv.err -t coolmri-sshd-health \
+    "sshd configuration is invalid; refusing automatic restart"
+  exit 1
+fi
+
+printf '%s\n' "$now" >"$restart_file"
+logger -p authpriv.warning -t coolmri-sshd-health \
+  "restarting OpenSSH after ${failures} consecutive failed probes"
+
+# ssh.service uses KillMode=process, so established administrator sessions are
+# not terminated when its listener is rebuilt.
+systemctl stop ssh.service
+systemctl restart ssh.socket
+systemctl start ssh.service
+sleep 2
+
+if healthy; then
+  rm -f "$failure_file"
+  logger -p authpriv.notice -t coolmri-sshd-health \
+    "OpenSSH banner probes recovered after automatic restart"
+  exit 0
+fi
+
+logger -p authpriv.err -t coolmri-sshd-health \
+  "OpenSSH banner probes still fail after automatic restart"
+exit 1

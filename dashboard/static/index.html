@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07110f">
+  <title>CoolMRI / Pi Fleet</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="grid-noise" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="CoolMRI Fleet home">
+      <span class="brand-mark">π</span>
+      <span><strong>COOLMRI</strong><small>PI FLEET CONTROL</small></span>
+    </a>
+    <div class="top-meta">
+      <span id="auditAge">Audit loading</span>
+      <span class="live"><i></i> READ ONLY</span>
+    </div>
+  </header>
+
+  <main>
+    <div id="auditWarning" class="audit-warning" role="alert" hidden></div>
+
+    <section class="hero">
+      <div>
+        <p class="eyebrow">OPERATIONS / EDGE DEVICES</p>
+        <h1>Every Pi.<br><em>One clear picture.</em></h1>
+      </div>
+      <p class="hero-copy">MRI and cardiovascular monitors share one operational baseline while keeping their sensor workloads, calibration, and site identity intact.</p>
+    </section>
+
+    <section class="scoreboard" aria-label="Fleet summary">
+      <article><span>ONLINE</span><strong id="onlineCount">—</strong><small id="onlineDetail">checking fleet</small></article>
+      <article><span>OFFLINE</span><strong id="offlineCount">—</strong><small id="fieldDetail">needs field attention</small></article>
+      <article><span>CONCERNS</span><strong id="concernCount">—</strong><small>actionable findings</small></article>
+      <article><span>BASELINE</span><strong id="baselineCount">—</strong><small>approved / online</small></article>
+      <article><span>OPS CORE</span><strong id="opsCoreCount">—</strong><small id="opsCoreDetail">aligned / assessed</small></article>
+      <article><span>SERVICE UNIT</span><strong id="serviceUserCount">—</strong><small id="serviceUserDetail">enabled + valid</small></article>
+      <article><span>SENSOR HEALTH</span><strong id="sensorHealthCount">—</strong><small id="sensorHealthDetail">end-to-end operational / assessed</small></article>
+      <article><span>PROBE MAP</span><strong id="probeMapCount">—</strong><small id="probeMapDetail">aligned / assessed</small></article>
+      <article><span>CALIBRATION MAP</span><strong id="calibrationMapCount">—</strong><small id="calibrationMapDetail">known offset IDs</small></article>
+      <article><span>1-WIRE GPIO</span><strong id="gpioMapCount">—</strong><small id="gpioMapDetail">overlay + live pin</small></article>
+      <article><span>RUNTIME POLICY</span><strong id="runtimePolicyCount">—</strong><small id="runtimePolicyDetail">effective behavior</small></article>
+      <article><span>UPDATES</span><strong id="updateCount">—</strong><small id="updateDetail">safe queue / held queue</small></article>
+      <article><span>OS TARGET</span><strong id="osPostureCount">—</strong><small id="osPostureDetail">26.04 LTS / assessed</small></article>
+      <article><span>RAM JOURNAL</span><strong id="journalPilotCount">—</strong><small id="optimizationDetail">volatile / online</small></article>
+      <article><span>BACKUPS</span><strong id="backupCount">—</strong><small id="backupDetail">recent / registered</small></article>
+    </section>
+
+    <section class="software-matrix" aria-labelledby="softwareMatrixTitle">
+      <div class="matrix-head">
+        <div>
+          <p class="eyebrow">COMMON LAYER / VERSION-AWARE</p>
+          <h2 id="softwareMatrixTitle">Operational software ledger</h2>
+        </div>
+        <p><strong id="softwareMatrixCount">—</strong><span id="softwareMatrixDetail">building required-package evidence</span></p>
+      </div>
+      <div class="software-ledger-shell">
+        <div class="software-ledger-labels" aria-hidden="true"><span>PACKAGE</span><span>COVERAGE</span><span>OBSERVED OS-COHORT VERSIONS</span></div>
+        <div id="softwareLedger" class="software-ledger" aria-live="polite">
+          <div class="software-ledger-loading">ASSEMBLING CROSS-FLEET PACKAGE MATRIX…</div>
+        </div>
+      </div>
+      <p class="matrix-note">Required presence is the convergence gate. Same-OS version spread is evidence for review—not authorization to bypass package, backup, Wi-Fi, storage, or restore gates.</p>
+    </section>
+
+    <section class="runtime-matrix" aria-labelledby="runtimeMatrixTitle">
+      <div class="runtime-head">
+        <div>
+          <p class="eyebrow">ACTIVE WORKLOAD / VIRTUALENV</p>
+          <h2 id="runtimeMatrixTitle">Python workload runtimes</h2>
+        </div>
+        <p><strong id="runtimeMatrixCount">—</strong><span id="runtimeMatrixDetail">reading service interpreters</span></p>
+      </div>
+      <div id="sensorRuntimeProfiles" class="runtime-profile-grid" aria-live="polite">
+        <div class="runtime-loading">INSPECTING MRI / CV / CAMERA DIRECT DEPENDENCIES…</div>
+      </div>
+      <p class="matrix-note">This ledger proves software environments only. End-to-end sensor health separately requires exact physical probes, an active service, and current complete telemetry. MRI and CV remain separate sensor profiles; installed camera agents are an optional third workload.</p>
+    </section>
+
+    <section class="evidence" aria-labelledby="evidenceTitle">
+      <div class="evidence-head">
+        <div>
+          <p class="eyebrow">MEASURED / NOT ASSUMED</p>
+          <h2 id="evidenceTitle">Fleet evidence strip</h2>
+        </div>
+        <p id="historyWindow">Building complete-audit history…</p>
+      </div>
+      <div class="evidence-grid">
+        <article class="availability-card">
+          <header><span>AVAILABILITY TAPE</span><strong id="availabilityNow">—</strong></header>
+          <div id="availabilityChart" class="availability-chart" aria-live="polite"></div>
+          <div class="card-foot"><span id="availabilityRange">—</span><span>each bar = complete audit</span></div>
+        </article>
+        <article class="write-card">
+          <header>
+            <span>ROOT-DEVICE WRITE TRACE</span>
+            <small>MiB/day · gaps mean reboot or invalid interval</small>
+          </header>
+          <div id="writeChart" class="write-chart" aria-live="polite">WAITING FOR VALID COUNTER WINDOWS…</div>
+          <div id="writeLegend" class="write-legend"></div>
+        </article>
+      </div>
+      <p class="evidence-note">Operational comparison only. Short samples and post-boot activity are not SSD endurance forecasts or rollout approval.</p>
+    </section>
+
+    <section class="dispatch" aria-labelledby="dispatchTitle">
+      <div class="dispatch-head">
+        <div>
+          <p class="eyebrow">MAINTENANCE / DISPATCH</p>
+          <h2 id="dispatchTitle">Safe rollout lanes</h2>
+        </div>
+        <p><span>READ ONLY</span> Gates are computed from the latest complete audit. Nearby backed pilots sort first.</p>
+      </div>
+      <div id="waveBoard" class="wave-board" aria-live="polite">
+        <div class="wave-loading">ASSEMBLING MAINTENANCE GATES…</div>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="toolbar">
+        <div class="filters" role="group" aria-label="Filter devices">
+          <button class="active" data-filter="all">All <b id="allBadge">0</b></button>
+          <button data-filter="mri">MRI <b id="mriBadge">0</b></button>
+          <button data-filter="cv">CV <b id="cvBadge">0</b></button>
+          <button data-filter="concern">Concerns <b id="concernBadge">0</b></button>
+          <button data-filter="offline">Offline <b id="offlineBadge">0</b></button>
+        </div>
+        <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Search site, host, IP…" autocomplete="off"></label>
+      </div>
+
+      <div class="table-shell">
+        <table>
+          <thead><tr><th>Device / site</th><th>Profile</th><th>Sensor data</th><th>Network</th><th>System</th><th>Finding</th><th></th></tr></thead>
+          <tbody id="fleetRows"><tr><td colspan="7" class="loading">CONTACTING FLEET…</td></tr></tbody>
+        </table>
+      </div>
+      <p id="emptyState" class="empty" hidden>No devices match this view.</p>
+    </section>
+  </main>
+
+  <dialog id="deviceDialog">
+    <button class="close" aria-label="Close">×</button>
+    <div id="dialogContent"></div>
+  </dialog>
+
+  <footer><span>COOLMRI EDGE OPERATIONS</span><span id="sourceFile">Awaiting report source</span></footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

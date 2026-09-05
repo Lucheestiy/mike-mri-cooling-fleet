@@ -1,0 +1,125 @@
+---
+- name: Prove attended MR3 OpenSSH self-recovery
+  hosts: agcmr3
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    ansible_become_exe: /home/agcmr3/.local/bin/sudo-rs-ansible-compat
+    ssh_recovery_test_confirm: false
+    ssh_recovery_test_host: 100.103.6.98
+    ssh_recovery_test_port: 2222
+
+  tasks:
+    - name: Require the exact attended recovery test
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'agcmr3'
+          - ssh_recovery_test_host == ansible_host
+          - ssh_recovery_test_port | int == 2222
+          - ansible_check_mode or ssh_recovery_test_confirm | bool
+
+    - name: Require healthy pre-test services
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ item }}"]
+      loop:
+        - ssh.socket
+        - ssh.service
+        - tailscaled.service
+        - mri-sensor.service
+        - coolmri-sshd-health.timer
+      changed_when: false
+      check_mode: false
+
+    - name: Run the guarded recovery proof
+      when: not ansible_check_mode
+      block:
+        - name: Arm an independent two-minute SSH fallback
+          ansible.builtin.command:
+            argv:
+              - systemd-run
+              - --unit=coolmri-sshd-test-fallback
+              - --on-active=2m
+              - /bin/bash
+              - -c
+              - >-
+                systemctl stop ssh.service;
+                systemctl restart ssh.socket;
+                systemctl start ssh.service
+          changed_when: true
+
+        - name: Stop both listeners and require watchdog recovery
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+
+            restore_access() {
+              if ! systemctl is-active --quiet ssh.socket ||
+                 ! systemctl is-active --quiet ssh.service; then
+                systemctl stop ssh.service || true
+                systemctl restart ssh.socket || true
+                systemctl start ssh.service || true
+              fi
+            }
+            trap 'result=$?; restore_access; exit "$result"' EXIT
+
+            rm -f /run/coolmri-sshd-health/consecutive-failures
+            systemctl stop ssh.service
+            systemctl stop ssh.socket
+
+            for attempt in 1 2 3; do
+              COOLMRI_SSH_RESCUE_HOST={{ ssh_recovery_test_host | quote }} \
+              COOLMRI_SSH_RESCUE_PORT={{ ssh_recovery_test_port | quote }} \
+              COOLMRI_SSH_FAILURE_LIMIT=3 \
+              COOLMRI_SSH_RESTART_COOLDOWN_SECONDS=900 \
+                /usr/local/sbin/coolmri-sshd-health
+            done
+
+            systemctl is-active --quiet ssh.socket
+            systemctl is-active --quiet ssh.service
+            test ! -e /run/coolmri-sshd-health/consecutive-failures
+            timeout 6 bash -c \
+              'exec 3<>/dev/tcp/127.0.0.1/22; IFS= read -r -t 5 x <&3; [[ $x == SSH-* ]]'
+            timeout 6 bash -c \
+              'exec 3<>/dev/tcp/{{ ssh_recovery_test_host }}/{{ ssh_recovery_test_port }}; IFS= read -r -t 5 x <&3; [[ $x == SSH-* ]]'
+            echo recovery_test=passed
+          args:
+            executable: /bin/bash
+          register: ssh_recovery_test
+          changed_when: true
+
+        - name: Require the explicit recovery marker
+          ansible.builtin.assert:
+            that:
+              - "'recovery_test=passed' in ssh_recovery_test.stdout_lines"
+
+      always:
+        - name: Cancel the independent fallback
+          ansible.builtin.shell: |
+            systemctl stop coolmri-sshd-test-fallback.timer 2>/dev/null || true
+            systemctl stop coolmri-sshd-test-fallback.service 2>/dev/null || true
+            systemctl reset-failed coolmri-sshd-test-fallback.service 2>/dev/null || true
+          args:
+            executable: /bin/bash
+          changed_when: false
+          when: not ansible_check_mode
+
+    - name: Prove a fresh controller connection after recovery
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -p
+          - "{{ ssh_recovery_test_port | string }}"
+          - -i
+          - /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          - -o
+          - BatchMode=yes
+          - -o
+          - IdentitiesOnly=yes
+          - -o
+          - ConnectTimeout=8
+          - "agcmr3@{{ ssh_recovery_test_host }}"
+          - "test \"$(id -un)\" = agcmr3"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      when: not ansible_check_mode

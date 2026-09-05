@@ -1,0 +1,10 @@
+all:
+  children:
+    backup_hub:
+      hosts:
+        mik-eq-backup:
+          # Privileged setup runs through the administrator account. Routine
+          # backup collection still uses the restricted resticbackup SSH alias.
+          ansible_user: mik
+          ansible_host: 192.168.0.113
+          ansible_ssh_private_key_file: /root/.ssh/mri_pi_fleet_ed25519

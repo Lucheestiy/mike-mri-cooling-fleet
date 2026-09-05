@@ -1,0 +1,93 @@
+---
+- name: Repair the SVI Vida MR2 Eaton website uploader
+  hosts: svimr2
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    ansible_become_exe: /home/svimr2/.local/bin/sudo-rs-ansible-compat
+    eaton_spd_repair_confirm: false
+    eaton_spd_user: svimr2
+    eaton_spd_allowed_hosts:
+      - svimr2
+    eaton_spd_interface: eth0
+    eaton_spd_interface_mac: "2c:cf:67:cf:ff:32"
+    eaton_spd_pi_address: 192.168.1.10/24
+    eaton_spd_device_ip: 192.168.1.254
+    eaton_spd_project_dir: /home/svimr2/surge-monitor
+    eaton_spd_venv_dir: /home/svimr2/surge-monitor-venv-py314
+    eaton_spd_user_runtime_dir: /run/user/1000
+    eaton_spd_manage_network: false
+    eaton_spd_manage_old_service: false
+    eaton_spd_recheck_wait_online: false
+    eaton_spd_required_post_url: https://coolmri.com/api/spd-intake
+    eaton_spd_critical_services:
+      - ssh.socket
+      - ssh.service
+      - tailscaled.service
+      - mri-sensor.service
+
+  tasks:
+    - name: Require explicit SVI Vida MR2 repair confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or eaton_spd_repair_confirm | bool
+        fail_msg: Run check mode first, then set eaton_spd_repair_confirm=true.
+
+    - name: Preserve the external USB Wi-Fi path and repair the Eaton uploader
+      block:
+        - name: Require the external USB Wi-Fi default route
+          ansible.builtin.shell: |
+            set -eu
+            test "$(ip -4 route show default | awk 'NR == 1 {print $5}')" = wlx7419f8175740
+            test "$(cat /sys/class/net/wlx7419f8175740/operstate)" = up
+            test "$(cat /sys/class/net/eth0/carrier)" = 1
+          args:
+            executable: /bin/bash
+          changed_when: false
+          check_mode: false
+
+        - name: Install and verify the Eaton uploader role
+          ansible.builtin.include_role:
+            name: eaton_spd
+
+        - name: Reconfirm the external USB Wi-Fi default route
+          ansible.builtin.shell: |
+            set -eu
+            test "$(ip -4 route show default | awk 'NR == 1 {print $5}')" = wlx7419f8175740
+            test "$(cat /sys/class/net/wlx7419f8175740/operstate)" = up
+            test -z "$(ip -4 route show default dev eth0)"
+          args:
+            executable: /bin/bash
+          changed_when: false
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Stop the repaired user uploader during rollback
+          ansible.builtin.command:
+            argv:
+              - runuser
+              - -u
+              - svimr2
+              - --
+              - env
+              - XDG_RUNTIME_DIR=/run/user/1000
+              - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+              - systemctl
+              - --user
+              - stop
+              - surge-monitor.service
+          changed_when: true
+          failed_when: false
+
+        - name: Restore the existing Eaton static-address helper
+          ansible.builtin.systemd_service:
+            name: eth0-spd-ip.service
+            state: restarted
+            enabled: true
+          failed_when: false
+
+        - name: Stop after automatic SVI Vida rollback
+          ansible.builtin.fail:
+            msg: The SVI Vida MR2 uploader repair failed; its Ethernet helper remains restored.

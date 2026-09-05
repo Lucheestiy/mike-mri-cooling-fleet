@@ -1,0 +1,51 @@
+---
+- name: Install SMART tooling
+  ansible.builtin.apt:
+    name: smartmontools
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Keep SMART queries on-demand during the pilot
+  ansible.builtin.systemd_service:
+    name: smartmontools.service
+    state: stopped
+    enabled: false
+  when: not ansible_check_mode
+
+- name: Install sanitized storage-health helper
+  ansible.builtin.copy:
+    src: coolmri_storage_health.py
+    dest: /usr/local/sbin/coolmri-storage-health
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install narrow storage-health sudo rule
+  ansible.builtin.template:
+    src: coolmri-storage-health.sudoers.j2
+    dest: /etc/sudoers.d/coolmri-storage-health
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Query pilot storage health
+  ansible.builtin.command: sudo -n /usr/local/sbin/coolmri-storage-health
+  register: storage_health_result
+  changed_when: false
+  failed_when: false
+
+- name: Show pilot storage-health result
+  ansible.builtin.debug:
+    var: storage_health_result.stdout
+
+- name: Require usable read-only SMART evidence
+  ansible.builtin.assert:
+    that:
+      - storage_health_result.rc == 0
+      - (storage_health_result.stdout | from_json).available | default(false) | bool
+    fail_msg: >-
+      The installed on-demand SMART helper did not return usable health data;
+      stop this serial wave and inspect bridge compatibility before continuing.
+  when: not ansible_check_mode

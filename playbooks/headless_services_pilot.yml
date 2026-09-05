@@ -1,0 +1,314 @@
+---
+- name: Apply a reversible headless service profile to guarded MRI or CV hosts
+  hosts: agcmr1:agcmr3:gbh:gmcep1and2:gmcep3:gmcir3:gwvskyra:shmr:vwm3
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    headless_pilot_site_ids:
+      agcmr1: AGCMR1
+      agcmr3: AGCMR3
+      gbh: GBHAera
+      gmcep1and2: EP1and2
+      gmcep3: EP3
+      gmcir3: IR3
+      gwvskyra: GWVSkyra
+      shmr: SHMR
+      vwm3: VWM3
+    headless_pilot_telemetry_urls:
+      agcmr1: https://coolmri.com/api/sites/snapshot
+      agcmr3: https://coolmri.com/api/sites/snapshot
+      gbh: https://coolmri.com/api/sites/snapshot
+      gmcep1and2: https://cv.coolmri.com/api/sites/snapshot
+      gmcep3: https://cv.coolmri.com/api/sites/snapshot
+      gmcir3: https://cv.coolmri.com/api/sites/snapshot
+      gwvskyra: https://coolmri.com/api/sites/snapshot
+      shmr: https://coolmri.com/api/sites/snapshot
+      vwm3: https://coolmri.com/api/sites/snapshot
+    headless_pilot_sensor_units:
+      agcmr1: mri-sensor.service
+      agcmr3: mri-sensor.service
+      gbh: mri-sensor.service
+      gmcep1and2: cv-room-sensor.service
+      gmcep3: cv-room-sensor.service
+      gmcir3: cv-room-sensor.service
+      gwvskyra: mri-sensor.service
+      shmr: mri-sensor.service
+      vwm3: mri-sensor.service
+    headless_pilot_expected_probes:
+      agcmr1: 5
+      agcmr3: 5
+      gbh: 5
+      gmcep1and2: 5
+      gmcep3: 3
+      gmcir3: 4
+      gwvskyra: 5
+      shmr: 5
+      vwm3: 5
+    headless_pilot_backup_repositories:
+      gwvskyra: gwv-skyra
+    headless_pilot_backup_repository: >-
+      {{ headless_pilot_backup_repositories[inventory_hostname]
+         | default(inventory_hostname) }}
+    headless_pilot_disable_units:
+      - ModemManager.service
+      - bluetooth.service
+      - cups.service
+      - cups-browsed.service
+      - cups.socket
+      - cups.path
+    headless_pilot_stop_only_units:
+      - gdm.service
+      - colord.service
+    headless_pilot_changed_units: >-
+      {{ headless_pilot_disable_units + headless_pilot_stop_only_units }}
+    headless_state_probe_code: |
+      import json
+      import subprocess
+      import sys
+
+      def value(unit, prop):
+          result = subprocess.run(
+              ["systemctl", "show", unit, "--property", prop, "--value"],
+              check=True, text=True, capture_output=True,
+          )
+          return result.stdout.strip()
+
+      print(json.dumps({
+          unit: {
+              "active_state": value(unit, "ActiveState"),
+              "unit_file_state": value(unit, "UnitFileState"),
+          }
+          for unit in sys.argv[1:]
+      }, sort_keys=True))
+    headless_pilot_critical_units: >-
+      {{ [headless_pilot_sensor_units[inventory_hostname],
+          'tailscaled.service', 'NetworkManager.service', 'cron.service',
+          'rsyslog.service', 'avahi-daemon.service'] }}
+    headless_pilot_backup: >-
+      {{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}
+    headless_pilot_repo_status: >-
+      {{ headless_pilot_backup.repository_status
+         | selectattr('repository', 'equalto', headless_pilot_backup_repository)
+         | first | default({}) }}
+
+  pre_tasks:
+    - name: Require explicit backed-up one-host confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or headless_services_pilot_confirm | default(false) | bool
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname in ['agcmr1', 'agcmr3', 'gbh', 'gmcep1and2', 'gmcep3', 'gmcir3', 'gwvskyra', 'shmr', 'vwm3']
+          - headless_pilot_backup_repository in headless_pilot_backup.repositories
+          - headless_pilot_repo_status.activity_recent | default(false) | bool
+          - headless_pilot_backup.batch.result == 'success'
+        fail_msg: >-
+          This playbook is restricted to one explicitly mapped, backed MRI/CV host at a time.
+          Run --check with an explicit --limit first, then pass
+          -e headless_services_pilot_confirm=true to apply.
+
+    - name: Capture current server telemetry
+      ansible.builtin.uri:
+        url: "{{ headless_pilot_telemetry_urls[inventory_hostname] }}"
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: headless_telemetry_before_response
+
+    - name: Select current pilot telemetry
+      ansible.builtin.set_fact:
+        headless_telemetry_before: >-
+          {{ headless_telemetry_before_response.json
+             | selectattr('id', 'equalto', headless_pilot_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require healthy pre-change telemetry
+      ansible.builtin.assert:
+        that:
+          - headless_telemetry_before.id | default('') == headless_pilot_site_ids[inventory_hostname]
+          - not (headless_telemetry_before.is_offline | default(true) | bool)
+          - headless_telemetry_before.last_updated | default(0) | int > 0
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.local/bin"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0700"
+      become: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0700"
+      become: false
+
+    - name: Capture pre-change service state
+      ansible.builtin.service_facts:
+
+    - name: Require package manager to be idle
+      ansible.builtin.shell: >-
+        if systemctl is-active --quiet apt-daily-upgrade.service
+        || systemctl is-active --quiet apt-daily.service
+        || pgrep -x apt-get >/dev/null
+        || pgrep -x dpkg >/dev/null
+        || pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade$' >/dev/null;
+        then exit 1; fi
+      changed_when: false
+      check_mode: false
+
+    - name: Capture current default target
+      ansible.builtin.command:
+        argv: [systemctl, get-default]
+      changed_when: false
+      check_mode: false
+      register: headless_default_target_before
+
+    - name: Capture exact state of every service the pilot may change
+      ansible.builtin.command:
+        argv: "{{ ['python3', '-c', headless_state_probe_code] + headless_pilot_changed_units }}"
+      changed_when: false
+      check_mode: false
+      register: headless_unit_states_before_raw
+
+    - name: Parse exact pre-pilot service states
+      ansible.builtin.set_fact:
+        headless_unit_states_before: "{{ headless_unit_states_before_raw.stdout | from_json }}"
+
+    - name: Require sensor and management services before pilot
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item].state == 'running'
+        fail_msg: "Required service {{ item }} is not running; do not start the pilot."
+      loop: "{{ headless_pilot_critical_units }}"
+
+    - name: Ensure pilot state directory exists
+      ansible.builtin.file:
+        path: /var/lib/coolmri
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      when: not ansible_check_mode
+
+    - name: Preserve a local pilot-state record
+      ansible.builtin.copy:
+        dest: /var/lib/coolmri/headless-services-pilot-before.json
+        owner: root
+        group: root
+        mode: "0600"
+        content: >-
+          {{ {'captured_at': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'default_target': headless_default_target_before.stdout,
+              'disable_units': headless_pilot_disable_units,
+              'stop_only_units': headless_pilot_stop_only_units,
+              'unit_states': headless_unit_states_before} | to_nice_json }}
+      when: not ansible_check_mode
+
+  tasks:
+    - name: Apply and verify headless pilot
+      when: not ansible_check_mode
+      block:
+        - name: Boot future starts into the headless target
+          ansible.builtin.command:
+            argv: [systemctl, set-default, multi-user.target]
+          changed_when: true
+
+        - name: Disable and stop unused peripheral services
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            enabled: false
+            state: stopped
+          loop: "{{ headless_pilot_disable_units }}"
+
+        - name: Stop static desktop helpers for this boot
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: stopped
+          loop: "{{ headless_pilot_stop_only_units }}"
+
+        - name: Allow sensor and telemetry cycles after service changes
+          ansible.builtin.pause:
+            seconds: 20
+
+        - name: Refresh post-change service state
+          ansible.builtin.service_facts:
+
+        - name: Prove critical services remained running
+          ansible.builtin.assert:
+            that:
+              - ansible_facts.services[item].state == 'running'
+          loop: "{{ headless_pilot_critical_units }}"
+
+        - name: Prove disabled services stopped
+          ansible.builtin.command:
+            argv: [systemctl, is-active, "{{ item }}"]
+          changed_when: false
+          register: headless_stopped_status
+          failed_when: headless_stopped_status.rc == 0
+          loop: "{{ headless_pilot_disable_units + headless_pilot_stop_only_units }}"
+
+        - name: Count live 1-Wire probes
+          ansible.builtin.shell: >-
+            set -o pipefail;
+            find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l
+          args:
+            executable: /bin/bash
+          changed_when: false
+          register: headless_probe_count
+
+        - name: Require all pilot probes
+          ansible.builtin.assert:
+            that:
+              - headless_probe_count.stdout | int == headless_pilot_expected_probes[inventory_hostname]
+
+        - name: Wait for server telemetry to advance
+          ansible.builtin.uri:
+            url: "{{ headless_pilot_telemetry_urls[inventory_hostname] }}"
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: headless_telemetry_after_response
+          until: >-
+            ((headless_telemetry_after_response.json
+              | selectattr('id', 'equalto', headless_pilot_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (headless_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+
+      rescue:
+        - name: Restore graphical boot target
+          ansible.builtin.command:
+            argv: [systemctl, set-default, "{{ headless_default_target_before.stdout }}"]
+          changed_when: true
+
+        - name: Restore pre-pilot unit-file state during automatic rollback
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            enabled: "{{ headless_unit_states_before[item].unit_file_state == 'enabled' }}"
+          loop: "{{ headless_pilot_disable_units }}"
+          when: headless_unit_states_before[item].unit_file_state in ['enabled', 'disabled']
+          failed_when: false
+
+        - name: Restore pre-pilot active state during automatic rollback
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            state: "{{ 'started' if headless_unit_states_before[item].active_state == 'active' else 'stopped' }}"
+          loop: "{{ headless_pilot_changed_units }}"
+          failed_when: false
+
+        - name: Stop the pilot after automatic rollback
+          ansible.builtin.fail:
+            msg: >-
+              Headless pilot verification failed. The graphical target and
+              prior peripheral services were restored.

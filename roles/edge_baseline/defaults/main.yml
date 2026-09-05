@@ -1,0 +1,16 @@
+edge_baseline:
+  timezone: America/New_York
+  journal_storage: persistent
+  journal_system_max_use: 128M
+  journal_runtime_max_use: 32M
+  journal_max_file_sec: 1day
+  journal_max_retention_sec: 7day
+
+# Set to absent from the rollback playbook to remove only the fleet journald
+# drop-in and return the host to its distribution/default journal policy.
+edge_baseline_journal_policy_state: present
+
+# Some fleet images use chrony instead of systemd-timesyncd.  Journald-only
+# pilots disable these unrelated baseline changes explicitly.
+edge_baseline_manage_timezone: true
+edge_baseline_manage_time_sync: true

@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify GCMC MR2 camera RAM-log proof after its natural schedule
+
+[Timer]
+OnCalendar=2026-07-18 09:03:00 America/New_York
+AccuracySec=30s
+Persistent=false
+Unit=coolmri-gcmcmr2-camera-ram-proof-complete.service
+
+[Install]
+WantedBy=timers.target

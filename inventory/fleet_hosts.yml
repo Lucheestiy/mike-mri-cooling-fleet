@@ -7,31 +7,67 @@ all:
           ansible_user: agcmr1
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: AGC MR1
-          mri_site: Geisinger Medical Center MRI #1 Sola
+          mri_site: "Geisinger Medical Center MRI #1 Sola"
+          camera_management: managed
         agcmr2:
           ansible_host: 100.94.132.85
           ansible_user: mrcu
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: AGC MR2
-          mri_site: Geisinger Medical Center MRI #2 Sola
+          mri_site: "Geisinger Medical Center MRI #2 Sola"
+          camera_management: managed
+          mri_notes: Older 1-Wire sensor-bus setup may require several boots to enumerate probes; newer upgraded sensor setups generally avoid this issue. After repeated warm-reboot failure, require a true cold power cycle and exact four-probe recovery before further maintenance.
         agcmr3:
           ansible_host: 100.103.6.98
+          ansible_port: 2222
           ansible_user: agcmr3
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: AGC MR3
-          mri_site: Geisinger Medical Center MRI #3 Vida
+          mri_site: "Geisinger Medical Center MRI #3 Vida"
+          camera_management: managed
+        gmcep1and2:
+          ansible_host: 100.71.29.126
+          ansible_user: gmcep1and2
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GMC EP1/EP2
+          mri_site: Geisinger Medical Center EP rooms 1 and 2
+          fleet_profile: cv
+          data_site_id: EP1and2
+          mri_notes: IR/EP Pi added for privinet network migration on 2026-06-08.
+        gmcep3:
+          ansible_host: 100.75.242.28
+          ansible_user: gmcep3
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GMC EP3
+          mri_site: Geisinger Medical Center EP room 3
+          fleet_profile: cv
+          data_site_id: EP3
+          mri_notes: IR/EP Pi added for privinet network migration on 2026-06-08.
+        gmcir3:
+          ansible_host: 100.112.182.50
+          ansible_user: gmcir3
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GMC IR3
+          mri_site: Geisinger Medical Center IR room 3
+          fleet_profile: cv
+          data_site_id: IR3
+          mri_notes: IR/EP Pi added for privinet network migration on 2026-06-08.
         oswmr1:
           ansible_host: 100.70.137.73
           ansible_user: oswmr1
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: OSW MR1
-          mri_site: Woodbine MRI #1 Sola
+          mri_site: "Woodbine MRI #1 Sola"
+          camera_management: managed
+          sensor_runtime_venv: /home/oswmr1/mike-mri-cooling/venv
         oswmr2:
           ansible_host: 100.66.66.116
           ansible_user: oswmr2
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: OSW MR2
-          mri_site: Woodbine MRI #2 Vida
+          mri_site: "Woodbine MRI #2 Vida"
+          camera_management: observed_legacy
+          sensor_runtime_venv: /home/oswmr2/mike-mri-cooling/venv
           mri_alt_users:
             - root
           mri_notes: Secondary root login also works; pubkey auth repaired on 2026-04-13.
@@ -39,38 +75,52 @@ all:
           ansible_host: 100.101.120.123
           ansible_user: svimr1
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          sensor_runtime_venv: /home/svimr1/mike-mri-cooling/venv
           mri_label: SVI MR1
-          mri_site: Susquehanna Valley Imaging MRI #1 Aera
+          mri_site: "Susquehanna Valley Imaging MRI #1 Aera"
+          mri_notes: >-
+            External MediaTek USB Wi-Fi is the intentional default route;
+            onboard wlan0 remains disconnected. The prior bus-wide 1-Wire fault
+            was resolved onsite on 2026-07-29; all five calibrated replacement
+            probes now enumerate and are managed through host_vars/svimr1.yml.
         svimr2:
           ansible_host: 100.117.38.77
           ansible_user: svimr2
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: SVI MR2
-          mri_site: Susquehanna Valley Imaging MRI #2 Vida
+          mri_site: "Susquehanna Valley Imaging MRI #2 Vida"
+          camera_management: managed
+          sensor_runtime_venv: /home/svimr2/mike-mri-cooling/venv
         gbh:
           ansible_host: 100.78.186.97
           ansible_user: gbh
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          sensor_runtime_venv: /home/gbh/mike-mri-cooling/venv
           mri_label: GBH MR
           mri_site: Geisinger Bloomsburg Hospital MRI Aera
         shmr:
           ansible_host: 100.105.207.116
           ansible_user: shmr
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          sensor_runtime_venv: /home/shmr/mike-mri-cooling/venv
           mri_label: Shamokin MR
           mri_site: Geisinger Shamokin Hospital MR Aera
         muncymr:
           ansible_host: 100.102.108.1
           ansible_user: muncymr
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          sensor_runtime_venv: /home/muncymr/mike-mri-cooling/venv
           mri_label: Muncy MR
           mri_site: Muncy Hospital MRI Sola
+          camera_management: observed_legacy
         jsmr:
           ansible_host: 100.70.4.30
           ansible_user: jsmr
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: Jersey Shore MR
           mri_site: Geisinger Jersey Shore Hospital MRI Sola
+          camera_management: observed_legacy
+          sensor_runtime_venv: /home/jsmr/mike-mri-cooling/venv
         phc:
           ansible_host: 100.110.254.62
           ansible_user: phc
@@ -95,30 +145,45 @@ all:
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: Pittston Sola
           mri_site: Pittston Sola
+          camera_management: managed
         pittstonvida:
           ansible_host: 100.75.151.96
           ansible_user: ptv
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: Pittston Vida
           mri_site: Pittston Vida
+          camera_management: managed
         gcmcsola:
           ansible_host: 100.106.107.124
           ansible_user: gcmc
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: GCMC
           mri_site: Geisinger Commonwealth School of Medicine Sola
+          camera_management: managed
         gcmcmr2:
           ansible_host: 100.67.249.11
           ansible_user: gcmc2
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          sensor_runtime_venv: /home/gcmc2/mike-mri-cooling/venv
           mri_label: GCMC MR2
           mri_site: GCMC MR2 Sola
+          camera_management: managed
         gswbsola:
           ansible_host: 100.99.117.107
           ansible_user: gswb
           ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
           mri_label: GSWB
           mri_site: GSWB Sola
+          camera_management: managed
+          sensor_runtime_venv: /home/gswb/mike-mri-cooling/venv
+        gwvs:
+          ansible_host: 100.82.46.17
+          ansible_user: gwvs
+          ansible_ssh_private_key_file: /home/mlweb/.ssh/mri_pi_fleet_ed25519
+          mri_label: GWVS
+          mri_site: GWV Magnetom Sola
+          camera_management: managed
+          sensor_runtime_venv: /home/gwvs/mike-mri-cooling/venv
         gwvskyra:
           ansible_host: 100.113.100.18
           ansible_user: gwv

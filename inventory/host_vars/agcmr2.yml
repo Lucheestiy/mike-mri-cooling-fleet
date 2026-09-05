@@ -1,0 +1,35 @@
+mri_user: mrcu
+ansible_become_exe: /home/mrcu/.local/bin/sudo-rs-ansible-compat
+mri_modules:
+  - temp_sensors
+
+temp_sensors:
+  project_dir: /home/mrcu/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: GMCMR2
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  enable_service: true
+  start_service: true
+  # Five-probe replacement set installed 2026-07-28. Mapping was determined
+  # from the live AGC MR2 temperature signature and its established ranges:
+  # helium ~20.5/35 C, primary ~13/14 C, and room ~21 C.
+  probe_in_id: 28-00000070a421
+  probe_out_id: 28-00000070d37a
+  probe_primary_in_id: 28-00000070c02b
+  probe_primary_out_id: 28-0000006ebc26
+  probe_room_id: 28-000000703ac4
+  # Bundled calibration on GWVS, 60 samples on 2026-07-28.
+  # Offsets follow the physical probe serial numbers.
+  sensor_offsets:
+    "28-0000006ebc26": -0.1069
+    "28-000000703ac4": 0.1254
+    "28-00000070a421": -0.0183
+    "28-00000070c02b": -0.0423
+    "28-00000070d37a": 0.0421

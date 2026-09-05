@@ -1,0 +1,75 @@
+---
+- name: Install read-only SMART visibility on approved backed MRI and CV waves
+  hosts: agcmr1:agcmr2:agcmr3:gmcep1and2:gmcep3:gmcir3:oswmr1:oswmr2:svimr1:svimr2:gbh:shmr:muncymr:jsmr:pittstonsola:pittstonvida:gcmcsola:gcmcmr2:gswbsola:gwvskyra:vwm2:vwm3:gr
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    mri_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    storage_pilot_repository_overrides:
+      oswmr2: oswmr2nvme
+      pittstonsola: pittston-sola
+      pittstonvida: pittston-vida
+      gcmcsola: gcmc-sola
+      gswbsola: gswb-sola
+      gwvskyra: gwv-skyra
+    storage_pilot_repository: >-
+      {{ storage_pilot_repository_overrides.get(inventory_hostname, inventory_hostname) }}
+    storage_pilot_backup: >-
+      {{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}
+    storage_pilot_repo_status: >-
+      {{ storage_pilot_backup.repository_status
+         | selectattr('repository', 'equalto', storage_pilot_repository)
+         | first | default({}) }}
+  pre_tasks:
+    - name: Require explicit nearby-pilot confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or storage_health_pilot_confirm | default(false) | bool
+          - ansible_play_batch | length == 1
+          - inventory_hostname in ['agcmr1', 'agcmr2', 'agcmr3', 'gmcep1and2', 'gmcep3', 'gmcir3', 'oswmr1', 'oswmr2', 'svimr1', 'svimr2', 'gbh', 'shmr', 'muncymr', 'jsmr', 'pittstonsola', 'pittstonvida', 'gcmcsola', 'gcmcmr2', 'gswbsola', 'gwvskyra', 'vwm2', 'vwm3', 'gr']
+          - storage_pilot_repository in storage_pilot_backup.repositories
+          - storage_pilot_repo_status.activity_recent | default(false) | bool
+          - storage_pilot_backup.batch.result == 'success'
+        fail_msg: >-
+          This playbook is restricted to one nearby pilot. Pass
+          -e storage_health_pilot_confirm=true after backup and health preflight.
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Require writable filesystems and idle package management
+      ansible.builtin.shell: |
+        set -o pipefail
+        ! findmnt -n -o OPTIONS / | tr ',' '\n' | grep -qx ro
+        if mountpoint -q /boot/firmware; then
+          ! findmnt -n -o OPTIONS /boot/firmware | tr ',' '\n' | grep -qx ro
+        fi
+        ! systemctl is-active --quiet apt-daily-upgrade.service
+        ! systemctl is-active --quiet apt-daily.service
+        ! pgrep -x apt-get >/dev/null
+        ! pgrep -x dpkg >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+  roles:
+    - storage_health

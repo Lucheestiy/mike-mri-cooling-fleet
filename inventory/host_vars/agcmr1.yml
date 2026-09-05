@@ -43,6 +43,9 @@ camera_edge:
     w: 364
     h: 182
   debug_save_images: true
+  shutter_speed: 1500
+  gain: 2.5
+  captures_per_session: 10
   calibration_mode: false
   scheduled_hours: [9, 15]
   retry_every_minutes: 5

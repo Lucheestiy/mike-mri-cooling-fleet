@@ -1,0 +1,16 @@
+- name: Install restricted CV sensor service helper
+  ansible.builtin.copy:
+    src: cv-sensor-service
+    dest: "{{ cv_sensor_service.helper_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install restricted CV sensor service sudoers entry
+  ansible.builtin.template:
+    src: cv-sensor-service.sudoers.j2
+    dest: "{{ cv_sensor_service.sudoers_path }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s

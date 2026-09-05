@@ -1,0 +1,159 @@
+---
+- name: Onboard prepared Pis into the existing Restic pull hub
+  hosts: backup_hub
+  gather_facts: false
+  become: true
+  vars:
+    backup_hub_onboard_confirm: false
+    backup_hub_targets_file: /etc/restic-pi-backup-targets.psv
+    backup_hub_pull_helper: /usr/local/sbin/restic-pi-pull-backup
+    backup_hub_ssh_key: /root/.ssh/pi_backup_pull_ed25519
+    backup_hub_mount: /mnt/t7backup
+    # Nearby-first default. Later targets must be named explicitly.
+    backup_hub_onboard_target_ids:
+      - gcmcmr2
+    backup_hub_target_catalog:
+      - id: agcmr2
+        user: mrcu
+        ip: 100.94.132.85
+        label: AGC MR2
+        reported_host: mrcu
+      - id: gcmcmr2
+        user: gcmc2
+        ip: 100.67.249.11
+        label: GCMC MR2
+        reported_host: gcmc2
+      - id: vwm2
+        user: vwm2
+        ip: 100.126.97.119
+        label: VWM2
+        reported_host: vwm2
+      - id: vwm3
+        user: vwm3
+        ip: 100.88.55.37
+        label: VWM3
+        reported_host: vwm3
+      - id: glh
+        user: glh
+        ip: 100.120.102.8
+        label: GLH
+        reported_host: glh
+
+  tasks:
+    - name: Require explicit hub onboarding confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or backup_hub_onboard_confirm | bool
+          - backup_hub_onboard_target_ids | length > 0
+          - backup_hub_onboard_target_ids | difference(backup_hub_target_catalog | map(attribute='id') | list) | length == 0
+        fail_msg: >-
+          Run --check first, then pass -e backup_hub_onboard_confirm=true.
+          This action changes the privileged backup-hub target list and creates
+          real encrypted Restic snapshots. Target IDs must be a non-empty subset
+          of the reviewed catalog.
+
+    - name: Select the explicitly requested backup targets
+      ansible.builtin.set_fact:
+        backup_hub_targets: >-
+          {{ backup_hub_target_catalog
+             | selectattr('id', 'in', backup_hub_onboard_target_ids)
+             | list }}
+
+    - name: Require an exact target selection
+      ansible.builtin.assert:
+        that:
+          - backup_hub_targets | length == backup_hub_onboard_target_ids | length
+          - backup_hub_targets | map(attribute='id') | list | sort == backup_hub_onboard_target_ids | sort
+
+    - name: Verify required hub paths and mounted backup storage
+      ansible.builtin.shell: |
+        set -eu
+        findmnt -rn {{ backup_hub_mount | quote }} >/dev/null
+        test -s {{ backup_hub_ssh_key | quote }}
+        test -x {{ backup_hub_pull_helper | quote }}
+        test -f {{ backup_hub_targets_file | quote }}
+        test -s /root/.config/restic-backup/password
+      args:
+        executable: /bin/bash
+      check_mode: false
+      changed_when: false
+
+    - name: Prove hub root key and canonical export helper before changing targets
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ backup_hub_ssh_key }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - ConnectTimeout=12
+          - "{{ item.user }}@{{ item.ip }}"
+          - sudo
+          - -n
+          - /usr/local/sbin/pi-backup-export
+          - check
+      loop: "{{ backup_hub_targets }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: backup_hub_export_checks
+      changed_when: false
+      check_mode: false
+
+    - name: Require sanitized readiness from every target
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout.startswith('backup-export-ready user=')
+      loop: "{{ backup_hub_export_checks.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+
+    - name: Add exact backup target records
+      ansible.builtin.lineinfile:
+        path: "{{ backup_hub_targets_file }}"
+        regexp: "^{{ item.id | regex_escape }}\\|"
+        line: "{{ item.id }}|{{ item.user }}|{{ item.ip }}|{{ item.label }}|{{ item.reported_host }}"
+        owner: root
+        group: root
+        # The catalog contains only target IDs/users/IPs and is intentionally
+        # readable by the unprivileged coverage collector. Repositories and the
+        # Restic password remain root-only.
+        mode: "0644"
+        create: false
+        validate: >-
+          /bin/bash -c 'test "$(cut -d "|" -f 1 %s | sort | uniq -d | wc -l)" -eq 0'
+      loop: "{{ backup_hub_targets }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Run a real first pull backup for each new target
+      ansible.builtin.command:
+        argv:
+          - "{{ backup_hub_pull_helper }}"
+          - "{{ item.id }}"
+      loop: "{{ backup_hub_targets }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: backup_hub_first_backups
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Verify each repository has a latest snapshot for its host
+      ansible.builtin.shell: |
+        set -eu
+        export HOME=/root
+        export RESTIC_CACHE_DIR=/root/.cache/restic
+        export RESTIC_PASSWORD_FILE=/root/.config/restic-backup/password
+        restic -r {{ (backup_hub_mount ~ '/restic-pi-repos/' ~ item.id) | quote }} \
+          snapshots latest --host {{ item.id | quote }} --json \
+          | python3 -c 'import json,sys; assert json.load(sys.stdin)'
+      args:
+        executable: /bin/bash
+      loop: "{{ backup_hub_targets }}"
+      loop_control:
+        label: "{{ item.id }}"
+      changed_when: false
+      when: not ansible_check_mode

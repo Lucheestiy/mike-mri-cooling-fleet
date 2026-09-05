@@ -1,0 +1,15 @@
+[Unit]
+Description=Verify AGC MR3 v3 natural camera schedule against its saved baseline
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/mlweb/mri-cooling-pi-fleet
+ExecStart=/home/mlweb/mri-cooling-pi-fleet/scripts/complete_latest_camera_observation.sh agcmr3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/mlweb/mri-cooling-pi-fleet/reports
+TimeoutStartSec=600

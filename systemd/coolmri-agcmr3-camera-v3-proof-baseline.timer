@@ -1,0 +1,11 @@
+[Unit]
+Description=Take AGC MR3 v3 camera proof baseline before the natural 09:00 schedule
+
+[Timer]
+OnCalendar=2026-07-17 08:55:00 America/New_York
+AccuracySec=30s
+Persistent=false
+Unit=coolmri-agcmr3-camera-v3-proof-baseline.service
+
+[Install]
+WantedBy=timers.target

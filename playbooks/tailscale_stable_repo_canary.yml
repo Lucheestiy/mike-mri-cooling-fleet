@@ -1,0 +1,98 @@
+---
+- name: Converge the official Tailscale stable repository on one approved host
+  hosts: "{{ tailscale_repo_target | default('agcmr3') }}"
+  gather_facts: true
+  serial: 1
+  become: true
+  vars:
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    tailscale_repo_allowed_targets:
+      - agcmr3
+      - agcmr1
+      - agcmr2
+      - oswmr1
+      - oswmr2
+      - svimr1
+      - svimr2
+      - gbh
+      - shmr
+      - muncymr
+      - jsmr
+      - pittstonsola
+      - pittstonvida
+      - gcmcsola
+      - gcmcmr2
+      - gswbsola
+      - gwvskyra
+      - vwm2
+      - vwm3
+    tailscale_repo_allowed_releases:
+      - noble
+      - plucky
+      - questing
+      - resolute
+    tailscale_repo_key_sha256: 3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39
+    tailscale_repo_path: /etc/apt/sources.list.d/tailscale.list
+    tailscale_repo_state: present
+
+  pre_tasks:
+    - name: Require an explicit approved one-host confirmation
+      ansible.builtin.assert:
+        that:
+          - tailscale_repo_confirm | default(false) | bool
+          - ansible_play_hosts_all | length == 1
+          - ansible_play_batch | length == 1
+          - inventory_hostname in tailscale_repo_allowed_targets
+          - ansible_facts.distribution_release in tailscale_repo_allowed_releases
+          - tailscale_repo_state in ['present', 'absent']
+        fail_msg: >-
+          This playbook is restricted to one explicitly approved repository target.
+          Pass -e tailscale_repo_confirm=true after a current fleet preflight.
+
+    - name: Read the preinstalled official Tailscale signing key
+      ansible.builtin.stat:
+        path: /usr/share/keyrings/tailscale-archive-keyring.gpg
+        checksum_algorithm: sha256
+      register: tailscale_repo_key
+      when: tailscale_repo_state == 'present'
+
+    - name: Require the exact already-trusted signing key
+      ansible.builtin.assert:
+        that:
+          - tailscale_repo_key.stat.exists
+          - tailscale_repo_key.stat.isreg
+          - tailscale_repo_key.stat.checksum == tailscale_repo_key_sha256
+        fail_msg: The existing Tailscale signing key is absent or differs; do not add the repository.
+      when: tailscale_repo_state == 'present'
+
+  tasks:
+    - name: Install the release-specific official stable source
+      ansible.builtin.copy:
+        dest: "{{ tailscale_repo_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Tailscale packages for ubuntu {{ ansible_facts.distribution_release }}
+          deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu {{ ansible_facts.distribution_release }} main
+      when: tailscale_repo_state == 'present'
+
+    - name: Remove only the canary source during an explicit rollback
+      ansible.builtin.file:
+        path: "{{ tailscale_repo_path }}"
+        state: absent
+      when: tailscale_repo_state == 'absent'
+
+    - name: Refresh apt metadata without installing packages
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+
+    - name: Read Tailscale package policy after repository convergence
+      ansible.builtin.command: apt-cache policy tailscale
+      changed_when: false
+      register: tailscale_repo_policy
+
+    - name: Show the sanitized installed and candidate policy
+      ansible.builtin.debug:
+        var: tailscale_repo_policy.stdout_lines

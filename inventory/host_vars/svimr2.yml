@@ -5,6 +5,18 @@ mri_modules:
   - temp_sensors
   - camera_edge
 
+eaton_spd:
+  purpose: dedicated_surge_event_recorder
+  interface: eth0
+  pi_address: 192.168.1.10/24
+  device_ip: 192.168.1.254
+  default_route: false
+
+internet_uplink:
+  type: external_usb_wifi
+  interface: wlx7419f8175740
+  built_in_wifi_enabled: false
+
 temp_sensors:
   project_dir: /home/svimr2/mike-mri-cooling
   service_name: mri-sensor
@@ -43,13 +55,16 @@ camera_edge:
   image_width: 1920
   image_height: 1080
   upload_enabled: true
-  upload_mode: full_and_crop
+  upload_mode: cropped_only
   ocr_crop_coords:
     x: 708
     y: 520
     w: 364
     h: 182
   debug_save_images: false
+  shutter_speed: 1500
+  gain: 2.5
+  captures_per_session: 10
   calibration_mode: false
   install_cron: true
   scheduled_hours: [9, 15]

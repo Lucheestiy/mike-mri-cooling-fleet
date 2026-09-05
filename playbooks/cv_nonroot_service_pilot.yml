@@ -1,0 +1,306 @@
+- name: Run the nearby CV non-root service wave
+  hosts: gmcep1and2:gmcep3:gmcir3
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    cv_nonroot_pilot_confirm: false
+    mri_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    cv_unit_path: /etc/systemd/system/cv-room-sensor.service
+    cv_program_path: /opt/cv-room-monitor/src/cv_room_sensor.py
+    cv_python_path: /opt/cv-room-monitor/venv/bin/python
+    cv_helper_path: /usr/local/sbin/cv-sensor-service
+    cv_target_sha256: a7bb0bc02e548f37993345e54cd664ac4d6e3dc47ba0b5525d7402f3a07717aa
+    cv_sensor_service_user: "{{ ansible_user }}"
+    cv_sensor_service_group: "{{ ansible_user }}"
+    cv_data_site_ids:
+      gmcep1and2: EP1and2
+      gmcep3: EP3
+      gmcir3: IR3
+    cv_expected_probe_counts:
+      gmcep1and2: 5
+      gmcep3: 3
+      gmcir3: 4
+
+  pre_tasks:
+    - name: Require explicit nearby non-root pilot confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or cv_nonroot_pilot_confirm | bool
+          - ansible_play_batch | length == 1
+          - inventory_hostname in ['gmcep1and2', 'gmcep3', 'gmcir3']
+        fail_msg: >-
+          Run --check first, then pass -e cv_nonroot_pilot_confirm=true.
+          This serial wave is restricted to the three nearby backed GMC CV Pis.
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Load controller backup evidence
+      ansible.builtin.set_fact:
+        backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select this CV host backup activity
+      ansible.builtin.set_fact:
+        host_backup_status: >-
+          {{ backup_evidence.repository_status
+             | selectattr('repository', 'equalto', inventory_hostname)
+             | list | first | default({}) }}
+
+    - name: Enforce successful recent backup gate
+      ansible.builtin.assert:
+        that:
+          - backup_evidence.batch.result == 'success'
+          - backup_evidence.batch.timer_active | bool
+          - host_backup_status.activity_recent | default(false) | bool
+
+    - name: Preserve exact pre-pilot service unit
+      ansible.builtin.slurp:
+        src: "{{ cv_unit_path }}"
+      register: prior_cv_unit
+
+    - name: Inspect canonical CV sensor program
+      ansible.builtin.stat:
+        path: "{{ cv_program_path }}"
+        checksum_algorithm: sha256
+      register: cv_program
+
+    - name: Inspect CV virtual-environment Python
+      ansible.builtin.stat:
+        path: "{{ cv_python_path }}"
+      register: cv_python
+
+    - name: Count current physical 1-Wire probes
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: physical_probes
+
+    - name: Read current service user
+      ansible.builtin.command: systemctl show cv-room-sensor.service -p User --value
+      changed_when: false
+      check_mode: false
+      register: prior_service_user
+
+    - name: Prove the site account can read CV devices and configuration
+      ansible.builtin.command:
+        argv:
+          - "{{ cv_python_path }}"
+          - -c
+          - >-
+            from pathlib import Path;
+            from dotenv import dotenv_values;
+            from w1thermsensor import W1ThermSensor;
+            v=dotenv_values(Path('/opt/cv-room-monitor/.env'));
+            assert v.get('SITE_ID') == '{{ cv_data_site_ids[inventory_hostname] }}';
+            assert len(W1ThermSensor.get_available_sensors()) == {{ cv_expected_probe_counts[inventory_hostname] }}
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Verify non-root pilot prerequisites
+      ansible.builtin.assert:
+        that:
+          - prior_service_user.stdout | trim in ['', mri_user]
+          - cv_program.stat.checksum == cv_target_sha256
+          - cv_python.stat.exists
+          - cv_python.stat.executable
+          - physical_probes.matched | int == cv_expected_probe_counts[inventory_hostname]
+
+    - name: Verify CV sensor is active before pilot
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ cv_helper_path }}", is-active]
+      become: false
+      changed_when: false
+      check_mode: false
+
+    - name: Capture CV telemetry before pilot
+      ansible.builtin.uri:
+        url: https://cv.coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: telemetry_before_response
+
+    - name: Select pre-pilot CV telemetry
+      ansible.builtin.set_fact:
+        telemetry_before: >-
+          {{ telemetry_before_response.json
+             | selectattr('id', 'equalto', cv_data_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require current pre-pilot telemetry
+      ansible.builtin.assert:
+        that:
+          - telemetry_before.id | default('') == cv_data_site_ids[inventory_hostname]
+          - not (telemetry_before.is_offline | default(true) | bool)
+          - telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Install and verify non-root CV service unit
+      block:
+        - name: Install canonical non-root CV service unit
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/cv_sensor_service/templates/cv-room-sensor.service.j2"
+            dest: "{{ cv_unit_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+            validate: systemd-analyze verify %s
+          register: cv_unit_change
+
+        - name: Reload and restart changed CV service
+          ansible.builtin.systemd:
+            name: cv-room-sensor.service
+            daemon_reload: true
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - cv_unit_change.changed
+
+        - name: Allow CV sensor startup
+          ansible.builtin.pause:
+            seconds: 12
+          when:
+            - not ansible_check_mode
+            - cv_unit_change.changed
+
+        - name: Verify effective service identity and hardening
+          ansible.builtin.command: >-
+            systemctl show cv-room-sensor.service
+            -p User -p Group -p NoNewPrivileges -p PrivateTmp
+            -p ProtectSystem -p ProtectHome --no-pager
+          changed_when: false
+          check_mode: false
+          register: cv_service_security
+          when: not ansible_check_mode
+
+        - name: Require non-root hardened service settings
+          ansible.builtin.assert:
+            that:
+              - "('User=' ~ mri_user) in cv_service_security.stdout"
+              - "('Group=' ~ mri_user) in cv_service_security.stdout"
+              - "'NoNewPrivileges=yes' in cv_service_security.stdout"
+              - "'PrivateTmp=yes' in cv_service_security.stdout"
+              - "'ProtectSystem=strict' in cv_service_security.stdout"
+              - "'ProtectHome=yes' in cv_service_security.stdout"
+          when: not ansible_check_mode
+
+        - name: Verify CV sensor remains active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", is-active]
+          become: false
+          changed_when: false
+          check_mode: false
+          when: not ansible_check_mode
+
+        - name: Read bounded post-change CV logs
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", logs, --since, "2 minutes ago", --lines, "160"]
+          become: false
+          changed_when: false
+          check_mode: false
+          register: cv_sensor_logs
+          when: not ansible_check_mode
+
+        - name: Prove all configured probes matched without startup errors
+          ansible.builtin.assert:
+            that:
+              - "'Traceback (most recent call last)' not in cv_sensor_logs.stdout"
+              - "'Configured ' not in cv_sensor_logs.stdout or ' sensor is missing:' not in cv_sensor_logs.stdout"
+              - >-
+                ('Matched ' ~ cv_expected_probe_counts[inventory_hostname] | string ~
+                 ' of ' ~ cv_expected_probe_counts[inventory_hostname] | string ~
+                 ' configured sensors') in cv_sensor_logs.stdout
+          when: not ansible_check_mode
+
+        - name: Wait for CV telemetry to advance
+          ansible.builtin.uri:
+            url: https://cv.coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: telemetry_after_response
+          until: >-
+            ((telemetry_after_response.json
+              | selectattr('id', 'equalto', cv_data_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+          when: not ansible_check_mode
+
+        - name: Select post-pilot CV telemetry
+          ansible.builtin.set_fact:
+            telemetry_after: >-
+              {{ telemetry_after_response.json
+                 | selectattr('id', 'equalto', cv_data_site_ids[inventory_hostname])
+                 | list | first | default({}) }}
+          when: not ansible_check_mode
+
+        - name: Prove all mapped readings remain live
+          ansible.builtin.assert:
+            that:
+              - not (telemetry_after.is_offline | default(true) | bool)
+              - telemetry_after.last_updated | int > telemetry_before.last_updated | int
+              - telemetry_after.helium_in is number
+              - telemetry_after.helium_out is number
+              - telemetry_after.primary_in is number
+              - cv_expected_probe_counts[inventory_hostname] | int < 4 or telemetry_after.primary_out is number
+              - cv_expected_probe_counts[inventory_hostname] | int < 5 or telemetry_after.room_temp is number
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Restore exact pre-pilot CV service unit
+          ansible.builtin.copy:
+            content: "{{ prior_cv_unit.content | b64decode }}"
+            dest: "{{ cv_unit_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Reload and restart restored CV service
+          ansible.builtin.systemd:
+            name: cv-room-sensor.service
+            daemon_reload: true
+            state: restarted
+
+        - name: Allow restored CV sensor recovery
+          ansible.builtin.pause:
+            seconds: 12
+
+        - name: Verify restored CV sensor is active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop after verified exact rollback
+          ansible.builtin.fail:
+            msg: >-
+              CV non-root verification failed on {{ inventory_hostname }}; the exact prior unit was
+              restored, daemon-reloaded, restarted, and verified active.

@@ -1,0 +1,24 @@
+---
+eaton_spd_user: agcmr3
+eaton_spd_allowed_hosts:
+  - agcmr3
+eaton_spd_interface: eth0
+eaton_spd_interface_mac: "2c:cf:67:cf:68:45"
+eaton_spd_connection_uuid: "626dd384-8b3d-3690-9511-192b2c79b3fd"
+eaton_spd_pi_address: 192.168.1.10/24
+eaton_spd_device_ip: 192.168.1.254
+eaton_spd_project_dir: "/home/{{ eaton_spd_user }}/surge-monitor"
+eaton_spd_venv_dir: "/home/{{ eaton_spd_user }}/surge-monitor-venv-py314"
+eaton_spd_user_runtime_dir: "/run/user/1000"
+eaton_spd_old_service: spd-poller.service
+eaton_spd_manage_network: true
+eaton_spd_manage_old_service: true
+eaton_spd_recheck_wait_online: true
+eaton_spd_required_post_url: https://coolmri.com/api/spd-intake
+eaton_spd_critical_services:
+  - ssh.socket
+  - ssh.service
+  - tailscaled.service
+  - mri-sensor.service
+  - coolmri-sshd-health.timer
+  - NetworkManager-wait-online.service

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 0 ]]; then
+  echo "This helper accepts no arguments." >&2
+  exit 2
+fi
+
+pin=4
+for config in /boot/firmware/config.txt /boot/firmware/usercfg.txt /boot/config.txt; do
+  [[ -r "$config" ]] || continue
+  line=$(awk '/^[[:space:]]*dtoverlay=w1-gpio/ {last=$0} END {print last}' "$config")
+  if [[ "$line" =~ gpiopin=([0-9]+) ]]; then
+    pin="${BASH_REMATCH[1]}"
+  fi
+done
+
+pin_state="unavailable"
+if command -v pinctrl >/dev/null 2>&1; then
+  pin_state=$(pinctrl get "$pin" 2>&1 || true)
+elif command -v raspi-gpio >/dev/null 2>&1; then
+  pin_state=$(raspi-gpio get "$pin" 2>&1 || true)
+elif [[ -r /sys/kernel/debug/gpio ]]; then
+  # Raspberry Pi 5 Ubuntu images do not always include a userspace pin utility.
+  # The kernel debug view is read-only and still identifies the GPIO consumer,
+  # direction, and electrical level (for example, GPIO17/onewire/out/high).
+  pin_state=$(awk -v gpio="GPIO${pin}" '
+    index($0, "(" gpio) {
+      sub(/^[[:space:]]+/, "")
+      print
+      exit
+    }
+  ' /sys/kernel/debug/gpio)
+  [[ -n "$pin_state" ]] || pin_state="unavailable"
+fi
+
+throttled=""
+if command -v vcgencmd >/dev/null 2>&1; then
+  throttled=$(vcgencmd get_throttled 2>/dev/null || true)
+fi
+
+printf 'one_wire_pin=%s\n' "$pin"
+printf 'pin_state=%s\n' "$pin_state"
+printf 'throttled=%s\n' "$throttled"

@@ -1,0 +1,321 @@
+---
+- name: Run a reviewed upload-disabled camera v3 candidate canary
+  hosts: "{{ camera_v3_candidate_target | default('none') }}"
+  gather_facts: false
+  become: false
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    camera_v3_candidate_confirm: false
+    camera_v3_candidate_target_effective: "{{ camera_v3_candidate_target | default('none') }}"
+    camera_canary_base: "/dev/shm/coolmri-camera-v3-canary-{{ inventory_hostname }}"
+    camera_canary_source: "{{ playbook_dir }}/../roles/camera_edge/files/edge/scheduled_capture.py"
+    camera_runtime_names:
+      - scheduled_capture.py
+      - retry_failed_sessions.py
+      - run_scheduled_capture.sh
+      - run_retry_check.sh
+
+  pre_tasks:
+    - name: Load reviewed camera convergence contracts
+      ansible.builtin.set_fact:
+        camera_convergence: >-
+          {{ lookup('ansible.builtin.file', playbook_dir + '/../inventory/camera_convergence.yml') | from_yaml }}
+        camera_primary_observations: []
+
+    - name: Select the explicitly requested candidate contract
+      ansible.builtin.set_fact:
+        camera_candidate_contract: >-
+          {{ camera_convergence.hosts[camera_v3_candidate_target_effective] | default({}) }}
+
+    - name: Require an explicitly reviewed secondary candidate
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or camera_v3_candidate_confirm | bool
+          - inventory_hostname == camera_v3_candidate_target_effective
+          - camera_candidate_contract.status | default('') is match('^eligible_after_primary_pilot')
+          - camera_candidate_contract.target is mapping
+          - camera_candidate_contract.backup_repository | default('') | length > 0
+          - camera_candidate_contract.sensor_site_id | default('') | length > 0
+        fail_msg: >-
+          Run --check first, then pass camera_v3_candidate_confirm=true. The target
+          must be an explicitly reviewed eligible_after_primary_pilot candidate.
+
+    - name: Load completed primary camera observations
+      ansible.builtin.set_fact:
+        camera_primary_observations: >-
+          {{ camera_primary_observations
+             + [lookup('ansible.builtin.file', item) | from_json] }}
+      loop: "{{ query('ansible.builtin.fileglob', playbook_dir + '/../reports/camera_observation_*.json') }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      no_log: true
+
+    - name: Require natural v3 production proof from both nearby primaries
+      ansible.builtin.assert:
+        that:
+          - >-
+            camera_primary_observations
+            | selectattr('inventory_name', 'equalto', item)
+            | selectattr('ok', 'defined')
+            | selectattr('ok', 'equalto', true)
+            | selectattr('expected_source', 'defined')
+            | selectattr('expected_source', 'equalto', 'camera_edge_v3')
+            | selectattr('camera_session.count', 'defined')
+            | selectattr('camera_session.count', 'equalto', 10)
+            | list | length > 0
+        fail_msg: >-
+          Both GMC MR1 and GMC MR3 must have a completed natural ten-image
+          camera_edge_v3 production proof before any secondary hardware canary.
+      loop:
+        - agcmr1
+        - agcmr3
+
+    - name: Derive the reviewed host-specific canary settings
+      ansible.builtin.set_fact:
+        camera_user: "{{ mri_user | default(ansible_user) }}"
+        camera_repository: "{{ camera_candidate_contract.backup_repository }}"
+        camera_site_id: "{{ camera_candidate_contract.site_id }}"
+        camera_sensor_site_id: "{{ camera_candidate_contract.sensor_site_id }}"
+        camera_target: "{{ camera_candidate_contract.target }}"
+
+    - name: Derive installed camera and sensor paths
+      ansible.builtin.set_fact:
+        camera_base: "/home/{{ camera_user }}/mri-cooling-camera"
+        camera_edge_dir: "/home/{{ camera_user }}/mri-cooling-camera/edge"
+        camera_python: "/home/{{ camera_user }}/mri-cooling-camera/venv/bin/python3"
+        camera_sensor_env: "/home/{{ camera_user }}/mike-mri-cooling/.env"
+        camera_candidate_source_sha256: >-
+          {{ lookup('ansible.builtin.file', camera_canary_source, rstrip=false) | hash('sha256') }}
+
+    - name: Load current backup and restore evidence
+      ansible.builtin.set_fact:
+        camera_backup_evidence: >-
+          {{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}
+
+    - name: Select candidate backup and restore records
+      ansible.builtin.set_fact:
+        camera_backup_status: >-
+          {{ camera_backup_evidence.repository_status
+             | selectattr('repository', 'equalto', camera_repository)
+             | list | first | default({}) }}
+        camera_restore_status: >-
+          {{ camera_backup_evidence.restore_tests
+             | selectattr('repository', 'equalto', camera_repository)
+             | list | first | default({}) }}
+
+    - name: Require current backup and exact production restore proof
+      ansible.builtin.assert:
+        that:
+          - camera_backup_evidence.batch.result == 'success'
+          - camera_backup_evidence.batch.timer_active | bool
+          - camera_backup_status.activity_recent | default(false) | bool
+          - camera_restore_status.status | default('') == 'success'
+          - camera_restore_status.recent | default(false) | bool
+        fail_msg: >-
+          The selected camera host requires a current successful backup and a
+          recent successful decrypt/restore test before its hardware canary.
+
+    - name: Verify installed Python, exact probes, sensor, throttle, and idle camera
+      ansible.builtin.shell: |
+        set -o pipefail
+        test -x '{{ camera_python }}'
+        test -r '{{ camera_sensor_env }}'
+        systemctl is-active --quiet mri-sensor.service
+        configured="$(awk -F= '/^PROBE_.*_ID=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2}' '{{ camera_sensor_env }}' | sort -u)"
+        physical="$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' -printf '%f\n' | sort -u)"
+        test -n "$configured"
+        test "$configured" = "$physical"
+        test "$(vcgencmd get_throttled | sed 's/.*=//')" = "0x0"
+        ! pgrep -af '[s]cheduled_capture|[r]etry_failed|[r]picam-still|[l]ibcamera-still' >/dev/null
+      args:
+        executable: /bin/bash
+      register: camera_health_before
+      changed_when: false
+      check_mode: false
+
+    - name: Record production runtime hashes
+      ansible.builtin.command:
+        argv: "{{ ['sha256sum'] + (camera_runtime_names | map('regex_replace', '^(.*)$', camera_edge_dir + '/\\1') | list) }}"
+      register: camera_production_hashes_before
+      changed_when: false
+      check_mode: false
+
+    - name: Capture current sensor telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      register: camera_telemetry_before_response
+      changed_when: false
+      check_mode: false
+
+    - name: Select current candidate sensor telemetry
+      ansible.builtin.set_fact:
+        camera_telemetry_before: >-
+          {{ camera_telemetry_before_response.json
+             | selectattr('id', 'equalto', camera_sensor_site_id)
+             | list | first | default({}) }}
+
+    - name: Require current candidate sensor telemetry
+      ansible.builtin.assert:
+        that:
+          - camera_telemetry_before.id | default('') == camera_sensor_site_id
+          - not (camera_telemetry_before.is_offline | default(true) | bool)
+          - camera_telemetry_before.last_updated | default(0) | int > 0
+
+    - name: Finish successful dry-run after validating every canary gate
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+  tasks:
+    - name: Execute one RAM-only upload-disabled profiled capture
+      block:
+        - name: Run canonical source from standard input
+          ansible.builtin.command:
+            argv:
+              - "{{ camera_python }}"
+              - "-"
+            stdin: "{{ lookup('ansible.builtin.file', camera_canary_source) }}"
+          environment:
+            PYTHONDONTWRITEBYTECODE: "1"
+            CAMERA_BASE_DIR: "{{ camera_canary_base }}"
+            TMPDIR: "{{ camera_canary_base }}"
+            SITE_ID: "{{ camera_site_id }}-CANARY"
+            UPLOAD_ENABLED: "false"
+            UPLOAD_MODE: "{{ camera_target.upload_mode }}"
+            IMAGE_WIDTH: "1920"
+            IMAGE_HEIGHT: "1080"
+            OCR_CROP_COORDS: "{{ camera_target.crop | to_json }}"
+            SHUTTER_SPEED: "{{ camera_target.shutter_us }}"
+            GAIN: "{{ camera_target.gain }}"
+            CAPTURES_PER_SESSION: "1"
+            INTER_CAPTURE_DELAY_SEC: "0"
+            DEBUG_SAVE_IMAGES: "false"
+          register: camera_canary_result
+
+        - name: Verify successful upload-disabled capture evidence
+          ansible.builtin.assert:
+            that:
+              - camera_canary_result.rc == 0
+              - "'captured=1 uploaded=0 requested=1' in camera_canary_result.stderr"
+
+      always:
+        - name: Remove canary RAM workspace
+          ansible.builtin.file:
+            path: "{{ camera_canary_base }}"
+            state: absent
+
+        - name: Remove this account's canary RAM lock
+          ansible.builtin.shell: rm -f "/dev/shm/coolmri-camera-$(id -u).lock"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+    - name: Re-read production runtime hashes
+      ansible.builtin.command:
+        argv: "{{ ['sha256sum'] + (camera_runtime_names | map('regex_replace', '^(.*)$', camera_edge_dir + '/\\1') | list) }}"
+      register: camera_production_hashes_after
+      changed_when: false
+
+    - name: Re-verify exact probes, active sensor, throttle, and idle camera
+      ansible.builtin.shell: |
+        set -o pipefail
+        systemctl is-active --quiet mri-sensor.service
+        configured="$(awk -F= '/^PROBE_.*_ID=/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2}' '{{ camera_sensor_env }}' | sort -u)"
+        physical="$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' -printf '%f\n' | sort -u)"
+        test -n "$configured"
+        test "$configured" = "$physical"
+        test "$(vcgencmd get_throttled | sed 's/.*=//')" = "0x0"
+        ! pgrep -af '[s]cheduled_capture|[r]etry_failed|[r]picam-still|[l]ibcamera-still' >/dev/null
+      args:
+        executable: /bin/bash
+      register: camera_health_after
+      changed_when: false
+
+    - name: Wait for advancing sensor telemetry after the canary
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      register: camera_telemetry_after_response
+      changed_when: false
+      retries: 12
+      delay: 10
+      until: >-
+        (camera_telemetry_after_response.json
+         | selectattr('id', 'equalto', camera_sensor_site_id)
+         | map(attribute='last_updated') | first | default(0) | int)
+        > (camera_telemetry_before.last_updated | int)
+
+    - name: Prove production camera files and sensor path stayed healthy
+      ansible.builtin.assert:
+        that:
+          - camera_production_hashes_after.stdout == camera_production_hashes_before.stdout
+          - >-
+            not ((camera_telemetry_after_response.json
+                  | selectattr('id', 'equalto', camera_sensor_site_id)
+                  | map(attribute='is_offline') | first | default(true)) | bool)
+
+    - name: Select verified post-canary sensor telemetry
+      ansible.builtin.set_fact:
+        camera_telemetry_after: >-
+          {{ camera_telemetry_after_response.json
+             | selectattr('id', 'equalto', camera_sensor_site_id)
+             | list | first }}
+
+    - name: Write atomic controller evidence for the successful hardware canary
+      ansible.builtin.copy:
+        dest: >-
+          {{ playbook_dir }}/../reports/camera_v3_candidate_canary_{{ inventory_hostname }}_{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}.json
+        mode: "0644"
+        content: >-
+          {{ {
+               'kind': 'camera_v3_candidate_canary',
+               'schema': 1,
+               'passed': true,
+               'created_at': now(utc=true, fmt='%Y-%m-%dT%H:%M:%S.%fZ'),
+               'inventory_name': inventory_hostname,
+               'canonical_version': camera_convergence.canonical.version,
+               'candidate_source_sha256': camera_candidate_source_sha256,
+               'site_id': camera_site_id,
+               'sensor_site_id': camera_sensor_site_id,
+               'backup_repository': camera_repository,
+               'target_contract': camera_target,
+               'backup': {
+                 'activity_recent': camera_backup_status.activity_recent | default(false) | bool,
+                 'restore_status': camera_restore_status.status | default(''),
+                 'restore_recent': camera_restore_status.recent | default(false) | bool,
+                 'restore_snapshot_id': camera_restore_status.snapshot_id | default('')
+               },
+               'capture': {
+                 'requested': 1,
+                 'captured': 1,
+                 'uploaded': 0,
+                 'upload_enabled': false,
+                 'ram_workspace': camera_canary_base
+               },
+               'safety': {
+                 'both_primary_natural_proofs': true,
+                 'exact_probes_before': camera_health_before.rc == 0,
+                 'exact_probes_after': camera_health_after.rc == 0,
+                 'sensor_active_before': camera_health_before.rc == 0,
+                 'sensor_active_after': camera_health_after.rc == 0,
+                 'zero_throttle_before': camera_health_before.rc == 0,
+                 'zero_throttle_after': camera_health_after.rc == 0,
+                 'production_hashes_unchanged': camera_production_hashes_after.stdout == camera_production_hashes_before.stdout,
+                 'sensor_restarted': false,
+                 'rebooted': false
+               },
+               'production_hashes_before': camera_production_hashes_before.stdout_lines,
+               'production_hashes_after': camera_production_hashes_after.stdout_lines,
+               'telemetry': {
+                 'before_timestamp': camera_telemetry_before.last_updated | int,
+                 'after_timestamp': camera_telemetry_after.last_updated | int,
+                 'advanced': (camera_telemetry_after.last_updated | int) > (camera_telemetry_before.last_updated | int),
+                 'offline_after': camera_telemetry_after.is_offline | bool
+               }
+             } | to_nice_json }}
+      delegate_to: localhost

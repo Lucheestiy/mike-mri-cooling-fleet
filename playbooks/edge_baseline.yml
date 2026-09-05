@@ -1,0 +1,7 @@
+- name: Apply bounded CoolMRI edge baseline
+  hosts: pis
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  roles:
+    - role: edge_baseline

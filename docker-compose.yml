@@ -1,0 +1,37 @@
+services:
+  dashboard:
+    build: ./dashboard
+    container_name: coolmri-pi-fleet
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8096:8080"
+    env_file:
+      - .env
+    environment:
+      FLEET_REPORT_DIR: /data/reports
+      FLEET_EXPECTED_HOSTS: "28"
+      FLEET_HEALTH_MAX_AGE_SECONDS: "2700"
+      MRI_SNAPSHOT_URL: http://fastapi-api:5000/api/sites/snapshot
+      CV_SNAPSHOT_URL: http://cv-api:5000/api/sites/snapshot
+      CAMERA_RECENT_URL: http://mri-camera-backend:8001/api/camera/pressure/recent?limit=1000&hours=168
+      PRODUCTION_RETURN_PRESSURE_URL: http://fastapi-api:5000/api/return-pressure/latest-all
+    volumes:
+      - ./reports:/data/reports:ro
+    networks:
+      - prod
+      - cv
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  prod:
+    external: true
+    name: mri-cooling_default
+  cv:
+    external: true
+    name: mri-cooling-cv_default

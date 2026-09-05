@@ -1,0 +1,196 @@
+---
+- name: Guarded post-upgrade Python runtime recovery
+  hosts: fleet_ops
+  gather_facts: false
+  become: true
+  vars:
+    python_recovery_confirm: false
+    # Ubuntu 26.04 uses sudo-rs, which does not emit Ansible's requested
+    # privilege-escalation prompt without this compatibility wrapper.
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    sensor_service_unit: "{{ 'cv-room-sensor.service' if (fleet_profile | default('mri')) == 'cv' else 'mri-sensor.service' }}"
+    sensor_venv: "{{ sensor_runtime_venv | default('/opt/cv-room-monitor/venv' if (fleet_profile | default('mri')) == 'cv' else (temp_sensors.project_dir | default('/opt/mri/pi-sensor')) ~ '/venv') }}"
+    camera_venv: "/home/{{ ansible_user }}/mri-cooling-camera/venv"
+
+  pre_tasks:
+    - name: Require an explicit host limit and recovery confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_limit | default('') | length > 0
+          - python_recovery_confirm | bool
+        fail_msg: >-
+          Run against an explicitly limited, backed-up host and pass
+          -e python_recovery_confirm=true.
+
+    - name: Install temporary recovery helper
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/rebuild_python_runtime.py"
+        dest: /tmp/coolmri-rebuild-python-runtime.py
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0700"
+
+  tasks:
+    - name: Repair relocated sensor venv script paths
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /tmp/coolmri-rebuild-python-runtime.py
+          - --venv
+          - "{{ sensor_venv }}"
+          - --package
+          - python-dotenv>=1.0.0,<2
+          - --package
+          - requests>=2.31.0,<3
+          - --package
+          - w1thermsensor>=2.0.0,<3
+          - --check-import
+          - dotenv
+          - --check-import
+          - requests
+          - --check-import
+          - w1thermsensor
+      become_user: "{{ ansible_user }}"
+      register: sensor_runtime_path_repair
+      changed_when: (sensor_runtime_path_repair.stdout | from_json).changed | bool
+
+    - name: Probe sensor runtime imports
+      ansible.builtin.command:
+        argv:
+          - "{{ sensor_venv }}/bin/python3"
+          - -c
+          - import requests; import dotenv; import w1thermsensor
+      become_user: "{{ ansible_user }}"
+      register: sensor_runtime_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Recover broken sensor runtime
+      when: sensor_runtime_probe.rc != 0
+      block:
+        - name: Stop sensor service for atomic runtime replacement
+          ansible.builtin.systemd_service:
+            name: "{{ sensor_service_unit }}"
+            state: stopped
+
+        - name: Rebuild and retain the prior sensor venv
+          ansible.builtin.command:
+            argv:
+              - python3
+              - /tmp/coolmri-rebuild-python-runtime.py
+              - --venv
+              - "{{ sensor_venv }}"
+              - --package
+              - python-dotenv>=1.0.0,<2
+              - --package
+              - requests>=2.31.0,<3
+              - --package
+              - w1thermsensor>=2.0.0,<3
+              - --check-import
+              - dotenv
+              - --check-import
+              - requests
+              - --check-import
+              - w1thermsensor
+          become_user: "{{ ansible_user }}"
+          register: sensor_runtime_recovery
+
+      always:
+        - name: Restart sensor service after recovery attempt
+          ansible.builtin.systemd_service:
+            name: "{{ sensor_service_unit }}"
+            state: restarted
+
+    - name: Inspect optional camera installation
+      ansible.builtin.stat:
+        path: "/home/{{ ansible_user }}/mri-cooling-camera/edge/scheduled_capture.py"
+      register: camera_program
+
+    - name: Probe optional camera runtime imports
+      ansible.builtin.command:
+        argv:
+          - "{{ camera_venv }}/bin/python3"
+          - -c
+          - import numpy; import PIL; import requests; import dotenv
+      become_user: "{{ ansible_user }}"
+      register: camera_runtime_probe
+      changed_when: false
+      failed_when: false
+      when: camera_program.stat.exists
+
+    - name: Repair relocated optional camera venv script paths
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /tmp/coolmri-rebuild-python-runtime.py
+          - --venv
+          - "{{ camera_venv }}"
+          - --system-site-packages
+          - --package
+          - numpy>=2.0.0,<3
+          - --package
+          - Pillow>=11.0.0,<13
+          - --package
+          - pytesseract>=0.3.10,<1
+          - --package
+          - schedule>=1.2.0,<2
+          - --package
+          - python-dotenv>=1.0.0,<2
+          - --package
+          - requests>=2.31.0,<3
+          - --check-import
+          - numpy
+          - --check-import
+          - PIL
+          - --check-import
+          - requests
+          - --check-import
+          - dotenv
+      become_user: "{{ ansible_user }}"
+      register: camera_runtime_path_repair
+      changed_when: (camera_runtime_path_repair.stdout | from_json).changed | bool
+      when: camera_program.stat.exists
+
+    - name: Rebuild and retain a broken optional camera venv
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /tmp/coolmri-rebuild-python-runtime.py
+          - --venv
+          - "{{ camera_venv }}"
+          - --system-site-packages
+          - --package
+          - numpy>=2.0.0,<3
+          - --package
+          - Pillow>=11.0.0,<13
+          - --package
+          - pytesseract>=0.3.10,<1
+          - --package
+          - schedule>=1.2.0,<2
+          - --package
+          - python-dotenv>=1.0.0,<2
+          - --package
+          - requests>=2.31.0,<3
+          - --check-import
+          - numpy
+          - --check-import
+          - PIL
+          - --check-import
+          - requests
+          - --check-import
+          - dotenv
+      become_user: "{{ ansible_user }}"
+      register: camera_runtime_recovery
+      when:
+        - camera_program.stat.exists
+        - camera_runtime_probe.rc != 0
+
+  post_tasks:
+    - name: Verify sensor service is active
+      ansible.builtin.command: "systemctl is-active {{ sensor_service_unit }}"
+      changed_when: false
+
+    - name: Remove temporary recovery helper
+      ansible.builtin.file:
+        path: /tmp/coolmri-rebuild-python-runtime.py
+        state: absent

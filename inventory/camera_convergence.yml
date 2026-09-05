@@ -1,0 +1,192 @@
+schema_version: 1
+evidence_report: audit_20260717_172259.json
+
+canonical:
+  version: 3.0.0
+  state: primary_v3_production_verified_secondary_pending_natural_proof
+  upload_contract: server_side_ocr
+  runtime_files:
+    - scheduled_capture.py
+    - retry_failed_sessions.py
+    - run_scheduled_capture.sh
+    - run_retry_check.sh
+  safety:
+    deployment_default: disabled
+    bounded_debug_images: 20
+    bounded_retry_records: 20
+    bounded_retry_bytes: 134217728
+    retry_state: durable_atomic_json
+    logs: one_file_ram_capable
+
+common_target:
+  backend_url: https://cam.coolmri.com/api/camera/pressure
+  dimensions: {width: 1920, height: 1080}
+  crop: {x: 708, y: 520, w: 364, h: 182}
+  captures_per_session: 10
+  retry_every_minutes: 5
+  debug_save_images: false
+
+hosts:
+  agcmr1:
+    status: v3_production_verified
+    site_id: AGCMR1
+    sensor_site_id: AGCMR1
+    backup_repository: agcmr1
+    capture_times: ["09:00", "15:00"]
+    target: {upload_enabled: true, upload_mode: full_and_crop, shutter_us: 1500, gain: 2.5, debug_save_images: true, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: passed
+      exposure_contract_correction: audit_20260717_170048.json
+      latest_exact_restore: 8f5b3999faa0f7d0f2e45c0dec6f1a430e8e62cdb7d4fff05b96ffe7b0245e22
+      natural_v3_proof: camera_observation_20260718_090313.json
+      natural_v3_session: AGCMR1_SCHED_20260718T130001Z
+
+  agcmr2:
+    status: blocked_special_local_ocr_contract_review
+    site_id: GMCMR2
+    capture_times: ["09:05", "15:05"]
+    notes: Current wrapper passes 10 and the program uses local OCR/load_config; do not replace with server-OCR v3 without a separate contract review.
+
+  agcmr3:
+    status: v3_production_verified
+    site_id: AGCMR3
+    sensor_site_id: AGCMR3
+    backup_repository: agcmr3
+    capture_times: ["09:00", "15:00"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1000, gain: 0.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: passed
+      legacy_ram_log_production_session: camera_observation_20260716_150304.json
+      v3_production_pilot: passed_upload_disabled_smoke
+      post_deployment_audit: audit_20260716_225307.json
+      natural_v3_proof: camera_observation_20260717_164454.json
+      natural_v3_session: AGCMR3_SCHED_20260717T190001Z
+
+  oswmr1:
+    status: eligible_after_primary_pilot_observed_upload_preserved
+    site_id: OSWMR1
+    sensor_site_id: OSWMR1
+    backup_repository: oswmr1
+    capture_times: ["09:15", "15:15"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_oswmr1_20260718T143507Z.json
+      guarded_v3_deployment: camera_v3_candidate_deployment_oswmr1_20260718T142655Z.json
+      post_deployment_audit: audit_20260718_102451.json
+      latest_exact_restore: a4e2e96fb25ed9ba7a81acf69031b19503c0c7d2e41e95398f355c9534ebccd5
+      next_natural_proof: 2026-07-18T15:15:00-04:00
+    notes: Preserve observed production behavior. Although the legacy environment declares UPLOAD_ENABLED=false, the program ignores it and delivered 80 records across eight complete scheduled sessions in the seven days reviewed on 2026-07-17. V3 must upload cropped-only after its upload-disabled canary.
+
+  oswmr2:
+    status: eligible_after_primary_pilot
+    site_id: OSWMR2
+    sensor_site_id: OSWMR2
+    backup_repository: oswmr2nvme
+    capture_times: ["09:20", "15:20"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_oswmr2_20260718T152646Z.json
+    legacy_retention_job: "02:10 prune_failed_sessions"
+
+  svimr2:
+    status: eligible_after_primary_pilot
+    site_id: SVIMR2
+    sensor_site_id: SVIMR2
+    backup_repository: svimr2
+    capture_times: ["09:00", "15:00"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_svimr2_20260718T161008Z.json
+
+  muncymr:
+    status: eligible_after_primary_pilot
+    site_id: MUNCYMR
+    sensor_site_id: MuncySola
+    backup_repository: muncymr
+    capture_times: ["09:25", "15:25"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_muncymr_20260718T161009Z.json
+    legacy_retention_job: "01:30 cleanup_old_data"
+
+  jsmr:
+    status: eligible_after_primary_pilot
+    site_id: JSMR
+    sensor_site_id: JerseyShoreMR
+    backup_repository: jsmr
+    capture_times: ["09:30", "15:30"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: true, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_jsmr_20260718T161009Z.json
+    legacy_retention_job: "04:10 prune_failed_sessions"
+
+  pittstonsola:
+    status: eligible_after_primary_pilot
+    site_id: PittstonSola
+    sensor_site_id: PittstonSola
+    backup_repository: pittston-sola
+    capture_times: ["09:00", "15:00"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: true, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_pittstonsola_20260718T161010Z.json
+
+  pittstonvida:
+    status: eligible_after_primary_pilot
+    site_id: PittstonVida
+    sensor_site_id: PittstonVida
+    backup_repository: pittston-vida
+    capture_times: ["09:00", "15:00"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_pittstonvida_20260718T161010Z.json
+
+  gcmcsola:
+    status: eligible_after_primary_pilot
+    site_id: GCMCSola
+    sensor_site_id: GCMCSola
+    backup_repository: gcmc-sola
+    capture_times: ["09:00", "15:00"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_gcmcsola_20260718T161009Z.json
+
+  gcmcmr2:
+    status: eligible_after_primary_pilot_distinct_optics
+    site_id: GCMCMR2
+    sensor_site_id: GCMCMR2
+    backup_repository: gcmcmr2
+    capture_times: ["09:00", "15:00"]
+    target:
+      upload_enabled: true
+      upload_mode: cropped_only
+      shutter_us: 2500
+      gain: 1.0
+      debug_save_images: false
+      crop: {x: 760, y: 600, w: 320, h: 180}
+    notes: Production API schema review proves the v3 server-OCR payload is accepted and triggers the same backend OCR path. Preserve this host's distinct 2500 us / 1.0 exposure and 760,600,320,180 crop exactly; require the primary v3 proof and an upload-disabled hardware smoke before production.
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_gcmcmr2_20260718T161009Z.json
+
+  gswbsola:
+    status: eligible_after_primary_pilot
+    site_id: GSWBSola
+    sensor_site_id: GSWBSola
+    backup_repository: gswb-sola
+    capture_times: ["09:00", "15:00"]
+    target: {upload_enabled: true, upload_mode: cropped_only, shutter_us: 1500, gain: 2.5, debug_save_images: false, crop: {x: 708, y: 520, w: 364, h: 182}}
+    evidence:
+      upload_disabled_v3_hardware_canary: camera_v3_candidate_canary_gswbsola_20260718T161010Z.json
+
+  gwvs:
+    status: blocked_commissioning_upload_and_schedule_disabled
+    site_id: GWVSola
+    sensor_site_id: GWVSola
+    capture_times: ["09:00", "15:00"]
+    target:
+      upload_enabled: false
+      upload_mode: cropped_only
+      shutter_us: 1500
+      gain: 2.5
+      debug_save_images: true
+      crop: {x: 708, y: 520, w: 364, h: 182}
+    notes: Camera values match the reviewed commissioning configuration exactly. Publishing and cron installation remain deliberately disabled until field mapping and framing are approved; do not treat the installed agent as a production camera.

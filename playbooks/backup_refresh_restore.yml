@@ -1,0 +1,98 @@
+---
+- name: Refresh and restore-verify explicitly selected Pi backups
+  hosts: backup_hub
+  gather_facts: false
+  become: true
+  vars:
+    backup_refresh_restore_confirm: false
+    backup_refresh_restore_targets: []
+    backup_refresh_restore_allowed_targets:
+      - agcmr1
+      - agcmr2
+      - agcmr3
+      - gbh
+      - gcmc-sola
+      - gcmcmr2
+      - gmcep1and2
+      - gmcep3
+      - gmcir3
+      - gr
+      - gswb-sola
+      - gwv-skyra
+      - glh
+      - jsmr
+      - muncymr
+      - oswmr1
+      - oswmr2nvme
+      - pittston-sola
+      - pittston-vida
+      - sewer-pi
+      - shmr
+      - svimr1
+      - svimr2
+      - vwm2
+      - vwm3
+
+  tasks:
+    - name: Require an explicit valid target selection and confirmation
+      ansible.builtin.assert:
+        that:
+          - backup_refresh_restore_targets | length > 0
+          - backup_refresh_restore_targets | unique | length == backup_refresh_restore_targets | length
+          - backup_refresh_restore_targets | difference(backup_refresh_restore_allowed_targets) | length == 0
+          - ansible_check_mode or backup_refresh_restore_confirm | bool
+        fail_msg: >-
+          Select configured targets, run --check first, then pass
+          -e backup_refresh_restore_confirm=true.
+
+    - name: Verify the installed backup and restore helpers
+      ansible.builtin.command:
+        argv:
+          - test
+          - -x
+          - "{{ item }}"
+      check_mode: false
+      changed_when: false
+      loop:
+        - /usr/local/sbin/restic-pi-pull-backup
+        - /usr/local/sbin/coolmri-restic-restore-test
+
+    - name: Verify every selected target is configured
+      ansible.builtin.command:
+        argv:
+          - grep
+          - -qE
+          - "^{{ item }}\\|"
+          - /etc/restic-pi-backup-targets.psv
+      check_mode: false
+      changed_when: false
+      loop: "{{ backup_refresh_restore_targets }}"
+
+    - name: Create new encrypted snapshots with bounded cross-site concurrency
+      ansible.builtin.command:
+        argv: "{{ ['/usr/local/sbin/restic-pi-pull-backup'] + backup_refresh_restore_targets }}"
+      when: not ansible_check_mode
+      changed_when: true
+
+    - name: Decrypt and restore-test each new snapshot in tmpfs
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/coolmri-restic-restore-test
+          - "{{ item }}"
+      loop: "{{ backup_refresh_restore_targets }}"
+      when: not ansible_check_mode
+      changed_when: true
+
+    - name: Require successful restore reports for every selected target
+      ansible.builtin.command:
+        argv:
+          - jq
+          - -e
+          - --arg
+          - repository
+          - "{{ item }}"
+          - '.repository == $repository and .status == "success" and (.snapshot_id | length) == 64'
+          - "/var/lib/coolmri-fleet/restore-tests/{{ item }}.json"
+      loop: "{{ backup_refresh_restore_targets }}"
+      when: not ansible_check_mode
+      changed_when: false

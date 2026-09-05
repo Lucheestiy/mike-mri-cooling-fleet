@@ -1,0 +1,35 @@
+mri_user: agcmr3
+mri_modules:
+  - temp_sensors
+
+eaton_spd:
+  purpose: dedicated_surge_event_recorder
+  interface: eth0
+  pi_address: 192.168.1.10/24
+  device_ip: 192.168.1.254
+  device_catalog: SPD200480Y4K
+  default_route: false
+
+temp_sensors:
+  project_dir: /home/agcmr3/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: AGCMR3
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  probe_in_id: 28-000000524e6d
+  probe_out_id: 28-000000553408
+  probe_primary_in_id: 28-0000005245cc
+  probe_primary_out_id: 28-00000055922b
+  probe_room_id: 28-000000528ff9
+  sensor_offsets:
+    "28-0000005245cc": 0.04
+    "28-000000524e6d": -0.07
+    "28-000000528ff9": 0.13
+    "28-000000553408": -0.07
+    "28-00000055922b": -0.03

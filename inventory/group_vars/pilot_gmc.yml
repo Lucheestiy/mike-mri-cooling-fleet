@@ -1,0 +1,8 @@
+# Nearby pilot group: apply serially and verify telemetry after every host.
+edge_baseline:
+  timezone: America/New_York
+  journal_storage: volatile
+  journal_system_max_use: 128M
+  journal_runtime_max_use: 32M
+  journal_max_file_sec: 1day
+  journal_max_retention_sec: 1day

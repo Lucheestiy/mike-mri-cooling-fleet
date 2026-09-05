@@ -1,0 +1,72 @@
+- name: Align the read-only fleet status helper
+  hosts: fleet_ops
+  become: true
+  gather_facts: false
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    mri_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    status_helper_rollout_confirm: false
+  pre_tasks:
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+  tasks:
+    - name: Require explicit status-helper rollout confirmation
+      ansible.builtin.assert:
+        that:
+          - status_helper_rollout_confirm | bool
+          - mri_user | length > 0
+        fail_msg: >-
+          Set -e status_helper_rollout_confirm=true and select an explicit
+          --limit before aligning the read-only helper.
+
+    - name: Install read-only CoolMRI Pi status helper
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../roles/common/files/coolmri-pi-status"
+        dest: /usr/local/sbin/coolmri-pi-status
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install narrow status-helper sudo rule
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/common/templates/coolmri-pi-status.sudoers.j2"
+        dest: /etc/sudoers.d/coolmri-pi-status
+        owner: root
+        group: root
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Query status helper as the unprivileged fleet user
+      ansible.builtin.command: sudo -n /usr/local/sbin/coolmri-pi-status
+      become: false
+      changed_when: false
+      register: status_helper_result
+      when: not ansible_check_mode
+
+    - name: Verify sanitized status output
+      ansible.builtin.assert:
+        that:
+          - "'one_wire_pin=' in status_helper_result.stdout"
+          - "'pin_state=' in status_helper_result.stdout"
+          - "'throttled=' in status_helper_result.stdout"
+      when: not ansible_check_mode

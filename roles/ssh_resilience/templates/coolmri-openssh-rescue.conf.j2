@@ -1,0 +1,6 @@
+# Managed by mri-cooling-pi-fleet: ordinary OpenSSH recovery path.
+[Socket]
+ListenStream=
+ListenStream=0.0.0.0:22
+ListenStream=[::]:22
+ListenStream={{ ssh_resilience_tailscale_ipv4 }}:{{ ssh_resilience_port }}

@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
-"""
-Standalone script to retry failed capture sessions.
-Runs every 5 minutes via cron to check for and retry failed uploads.
-"""
+"""Retry durable CoolMRI camera upload records without taking new pictures."""
 
+from __future__ import annotations
+
+import fcntl
 import sys
-import os
-from pathlib import Path
 
-# Add the project edge directory to Python path dynamically
-EDGE_DIR = str(Path.home() / 'mri-cooling-camera' / 'edge')
-sys.path.insert(0, EDGE_DIR)
+from scheduled_capture import LOCK_PATH, logger, process_failed_sessions
 
-from scheduled_capture import process_extended_retries, logger
 
-def main():
-    """Main entry point for retry processing."""
-    try:
-        logger.info("🔄 FAILED SESSION RETRY CHECK")
-        process_extended_retries()
+def main() -> int:
+    with LOCK_PATH.open("w", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        recovered, attempted = process_failed_sessions()
+        if attempted:
+            logger.info("retry_recovered=%s retry_attempted=%s", recovered, attempted)
+        return 0 if recovered == attempted else 1
 
-    except Exception as e:
-        logger.error(f"Error in retry processing: {str(e)}")
-        sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

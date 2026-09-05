@@ -1,0 +1,76 @@
+---
+- name: Pause user-crontab camera jobs during RAM-log rollback
+  ansible.builtin.include_tasks: remove_cron.yml
+  when: camera_ram_logs_schedule_strategy == 'user_crontab'
+
+- name: Pause cron under watchdog during cron.d RAM-log rollback
+  ansible.builtin.include_tasks: pause_cron_service.yml
+  when: camera_ram_logs_schedule_strategy == 'cron_service_watchdog'
+
+- name: Restore persistent camera logs
+  block:
+    - name: Inspect RAM log link
+      ansible.builtin.stat:
+        path: "{{ camera_ram_logs_edge_dir }}/logs"
+        follow: false
+      register: camera_ram_link
+
+    - name: Inspect persistent archive
+      ansible.builtin.stat:
+        path: "{{ camera_ram_logs_archive_dir }}"
+      register: camera_persistent_archive
+
+    - name: Require the preserved persistent archive
+      ansible.builtin.assert:
+        that:
+          - camera_persistent_archive.stat.isdir | default(false)
+          - camera_ram_link.stat.islnk | default(false)
+        fail_msg: Camera RAM-log rollback prerequisites are not present.
+
+    - name: Preserve the final RAM-log sample once
+      ansible.builtin.command:
+        argv:
+          - cp
+          - -a
+          - "{{ camera_ram_logs_runtime_dir }}"
+          - "{{ camera_ram_logs_rollback_capture_dir }}"
+      args:
+        creates: "{{ camera_ram_logs_rollback_capture_dir }}"
+
+    - name: Remove RAM log link
+      ansible.builtin.file:
+        path: "{{ camera_ram_logs_edge_dir }}/logs"
+        state: absent
+
+    - name: Restore persistent log directory
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ camera_ram_logs_archive_dir }}"
+          - "{{ camera_ram_logs_edge_dir }}/logs"
+      args:
+        removes: "{{ camera_ram_logs_archive_dir }}"
+
+    - name: Remove camera tmpfiles rule
+      ansible.builtin.file:
+        path: "/etc/tmpfiles.d/coolmri-camera-logs-{{ mri_user }}.conf"
+        state: absent
+
+    - name: Remove camera runtime log rotation
+      ansible.builtin.file:
+        path: "/etc/logrotate.d/coolmri-camera-logs-{{ mri_user }}"
+        state: absent
+
+    - name: Remove camera runtime log directory
+      ansible.builtin.file:
+        path: "{{ camera_ram_logs_runtime_dir }}"
+        state: absent
+
+  always:
+    - name: Restore camera user crontab after rollback
+      ansible.builtin.include_tasks: restore_cron.yml
+      when: camera_ram_logs_schedule_strategy == 'user_crontab'
+
+    - name: Restore cron service after cron.d rollback
+      ansible.builtin.include_tasks: restore_cron_service.yml
+      when: camera_ram_logs_schedule_strategy == 'cron_service_watchdog'

@@ -1,0 +1,16 @@
+[Unit]
+Description=Surge Protector to Website Uploader (user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory={{ eaton_spd_project_dir }}
+ExecStart={{ eaton_spd_venv_dir }}/bin/python3 {{ eaton_spd_project_dir }}/surge_to_api.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+

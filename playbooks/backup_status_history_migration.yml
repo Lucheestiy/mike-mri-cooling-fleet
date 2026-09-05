@@ -1,0 +1,109 @@
+---
+- name: Preserve append-only backup success history without running backups
+  hosts: backup_hub
+  gather_facts: false
+  become: true
+  vars:
+    backup_status_history_migration_confirm: false
+    backup_helper_path: /usr/local/sbin/restic-pi-pull-backup
+    backup_status_dir: /var/lib/coolmri-fleet/backup-status
+    historical_agcmr1_marker:
+      repository: agcmr1
+      status: success
+      snapshot_id: 8500dba169eae8c11f3518d670705ec1a2233f70ecb7ad2cfb74a655384281fe
+      snapshot_time: "2026-07-17T15:50:14.592871988-04:00"
+      completed_at: "2026-07-17T15:57:31-04:00"
+
+  tasks:
+    - name: Require explicit history-migration confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or backup_status_history_migration_confirm | bool
+        fail_msg: Run --check first, then pass backup_status_history_migration_confirm=true.
+
+    - name: Prove the historical full-batch boundary and MR1 completion
+      ansible.builtin.shell: |
+        set -eu
+        grep -F '[2026-07-17T15:50:12-04:00] Starting Pi pull backup batch' /var/log/restic-pi-pull-backup.log >/dev/null
+        grep -F '[2026-07-17T15:57:31-04:00] Complete agcmr1' /var/log/restic-pi-pull-backup.log >/dev/null
+        grep -F '[2026-07-17T16:22:33-04:00] Pi pull backup batch finished' /var/log/restic-pi-pull-backup.log >/dev/null
+      args:
+        executable: /bin/bash
+      check_mode: false
+      changed_when: false
+
+    - name: Install append-only-history backup helper
+      block:
+        - name: Install reviewed helper without invoking it
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../roles/backup_hub/files/restic-pi-pull-backup"
+            dest: "{{ backup_helper_path }}"
+            owner: root
+            group: root
+            mode: "0755"
+            backup: true
+            validate: /bin/bash -n %s
+          register: backup_history_helper_copy
+
+        - name: Seed current atomic markers into append-only history
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            history={{ (backup_status_dir + '/history') | quote }}
+            mkdir -p "$history"
+            for marker in {{ backup_status_dir | quote }}/*.json; do
+              test -f "$marker" || continue
+              repository="$(jq -er '.repository' "$marker")"
+              snapshot_id="$(jq -er '.snapshot_id' "$marker")"
+              jq -e '.status == "success" and (.snapshot_id | test("^[0-9a-f]{64}$"))' "$marker" >/dev/null
+              case "$repository" in (*[!a-zA-Z0-9._-]*|'') exit 2;; esac
+              destination="$history/$repository/$snapshot_id.json"
+              mkdir -p "$history/$repository"
+              if [ ! -e "$destination" ]; then
+                temporary="$(mktemp "$history/$repository/.${snapshot_id}.XXXXXX")"
+                install -m 0644 "$marker" "$temporary"
+                mv -f "$temporary" "$destination"
+              fi
+            done
+          args:
+            executable: /bin/bash
+          when: not ansible_check_mode
+          changed_when: true
+
+        - name: Preserve the overwritten MR1 full-batch success marker
+          ansible.builtin.copy:
+            content: "{{ historical_agcmr1_marker | to_nice_json }}\n"
+            dest: >-
+              {{ backup_status_dir }}/history/agcmr1/{{ historical_agcmr1_marker.snapshot_id }}.json
+            owner: root
+            group: root
+            mode: "0644"
+            force: false
+          when: not ansible_check_mode
+
+        - name: Validate current and historical MR1 markers independently
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            latest={{ (backup_status_dir + '/agcmr1.json') | quote }}
+            historical={{ (backup_status_dir + '/history/agcmr1/' + historical_agcmr1_marker.snapshot_id + '.json') | quote }}
+            test "$(jq -r '.snapshot_id' "$latest")" != "$(jq -r '.snapshot_id' "$historical")"
+            test "$(jq -r '.snapshot_id' "$historical")" = {{ historical_agcmr1_marker.snapshot_id | quote }}
+            test "$(jq -r '.completed_at' "$historical")" = {{ historical_agcmr1_marker.completed_at | quote }}
+          args:
+            executable: /bin/bash
+          when: not ansible_check_mode
+          changed_when: false
+
+      rescue:
+        - name: Restore prior helper after migration failure
+          ansible.builtin.copy:
+            src: "{{ backup_history_helper_copy.backup_file }}"
+            dest: "{{ backup_helper_path }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          when: backup_history_helper_copy.backup_file | default('') | length > 0
+
+        - name: Stop after helper rollback
+          ansible.builtin.fail:
+            msg: Backup status-history migration failed; the prior helper was restored.

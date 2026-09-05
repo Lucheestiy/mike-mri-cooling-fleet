@@ -1,0 +1,64 @@
+mri_user: gwvs
+mri_hostname: gwvs
+ansible_become_exe: /home/gwvs/.local/bin/sudo-rs-ansible-compat
+
+mri_modules:
+  - temp_sensors
+  - camera_edge
+
+temp_sensors:
+  project_dir: /home/gwvs/mike-mri-cooling
+  service_name: mri-sensor
+  site_name: GWVSola
+  scanner_id: ""
+  backend_url: http://api.coolmri.com/api/metrics
+  alerter_metrics_url: http://alerter.coolmri.com/metrics
+  dev_backend_url: http://100.74.19.56:5001/api/metrics
+  enable_dual_streaming: true
+  memory_only_mode: true
+  avg_window: 5
+  poll_sec: 10
+  # Permanent third five-probe set for GWVS. IDs are provisionally recorded in
+  # sorted order; publish bench data while service mode suppresses alarms until
+  # the final field mapping and installation are complete.
+  enable_service: true
+  start_service: true
+  probe_in_id: 28-0000006ff252
+  probe_out_id: 28-000000700c77
+  probe_primary_in_id: 28-000000708c2c
+  probe_primary_out_id: 28-00000070af65
+  probe_room_id: 28-0000007100e4
+  # 70 valid samples collected 2026-07-28T19:22:15Z–19:38:31Z.
+  # Offsets use the final 50-sample post-bonding window; target mean 23.8565 C.
+  sensor_offsets:
+    "28-0000006ff252": 0.3480
+    "28-000000700c77": -0.2245
+    "28-000000708c2c": 0.0717
+    "28-00000070af65": -0.1145
+    "28-0000007100e4": -0.0807
+
+camera_edge_deploy_approved: true
+camera_edge:
+  base_dir: /home/gwvs/mri-cooling-camera
+  site_id: GWVSola
+  camera_backend_url: https://cam.coolmri.com/api/camera/pressure
+  calibration_url: https://cam.coolmri.com/api/camera/images
+  image_width: 1920
+  image_height: 1080
+  # Commissioning guard: validate framing/crop locally before publishing.
+  upload_enabled: false
+  upload_mode: cropped_only
+  ocr_crop_coords:
+    x: 708
+    y: 520
+    w: 364
+    h: 182
+  shutter_speed: 1500
+  gain: 2.5
+  captures_per_session: 10
+  debug_save_images: true
+  debug_retain_images: 20
+  calibration_mode: true
+  install_cron: false
+  scheduled_hours: [9, 15]
+  retry_every_minutes: 5

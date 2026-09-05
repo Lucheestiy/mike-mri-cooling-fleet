@@ -1,0 +1,11 @@
+[Unit]
+Description=Check guarded camera deployments for natural-proof actions
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=10s
+Persistent=false
+Unit=coolmri-camera-proof-planner.service
+
+[Install]
+WantedBy=timers.target

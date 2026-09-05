@@ -1,0 +1,68 @@
+---
+- name: Publish sanitized evidence for the two active rsyslog RAM pilots
+  hosts: gmcir3:agcmr1
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    rsyslog_evidence_backfill_confirm: false
+    rsyslog_pilot_state_path: /var/lib/coolmri/rsyslog-ram-pilot-before.json
+    rsyslog_pilot_evidence_dir: /var/lib/coolmri-fleet
+    rsyslog_pilot_evidence_path: /var/lib/coolmri-fleet/rsyslog-ram-pilot.json
+    rsyslog_backfill_profiles:
+      gmcir3: {profile: cv, service: cv-room-sensor.service, probes: 4}
+      agcmr1: {profile: mri, service: mri-sensor.service, probes: 5}
+    rsyslog_backfill_profile: "{{ rsyslog_backfill_profiles[inventory_hostname] }}"
+
+  pre_tasks:
+    - name: Require explicit metadata-backfill confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or rsyslog_evidence_backfill_confirm | bool
+          - inventory_hostname in rsyslog_backfill_profiles
+
+    - name: Read root-only rollback-state metadata without its content
+      ansible.builtin.stat:
+        path: "{{ rsyslog_pilot_state_path }}"
+      register: rsyslog_backfill_state
+
+    - name: Require a healthy active RAM-only logging pilot
+      ansible.builtin.shell: |
+        set -o pipefail
+        test "{{ rsyslog_backfill_state.stat.exists | bool | lower }}" = true
+        test "$(systemctl is-active rsyslog.service || true)" = inactive
+        test "$(systemctl is-enabled rsyslog.service || true)" = disabled
+        test "$(systemctl is-active {{ rsyslog_backfill_profile.service }})" = active
+        test "$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l)" -eq "{{ rsyslog_backfill_profile.probes }}"
+        test "$(vcgencmd get_throttled)" = throttled=0x0
+        systemd-analyze cat-config systemd/journald.conf | grep -q '^Storage=volatile$'
+        systemd-analyze cat-config systemd/journald.conf | grep -q '^RuntimeMaxUse=32M$'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+  tasks:
+    - name: Create public sanitized pilot-evidence directory
+      ansible.builtin.file:
+        path: "{{ rsyslog_pilot_evidence_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Publish original pilot boundary without rollback content
+      ansible.builtin.copy:
+        dest: "{{ rsyslog_pilot_evidence_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: >-
+          {{ {
+               'kind': 'rsyslog_ram_pilot',
+               'inventory_name': inventory_hostname,
+               'profile': rsyslog_backfill_profile.profile,
+               'applied_epoch': rsyslog_backfill_state.stat.mtime | int
+             } | to_nice_json }}

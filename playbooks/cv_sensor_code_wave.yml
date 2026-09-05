@@ -1,0 +1,265 @@
+- name: Converge backed nearby CV sensor programs
+  hosts: gmcep3:gmcir3
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    cv_sensor_wave_confirm: false
+    mri_user: "{{ ansible_user }}"
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    cv_program_path: /opt/cv-room-monitor/src/cv_room_sensor.py
+    cv_python_path: /opt/cv-room-monitor/venv/bin/python
+    cv_helper_path: /usr/local/sbin/cv-sensor-service
+    cv_target_sha256: a7bb0bc02e548f37993345e54cd664ac4d6e3dc47ba0b5525d7402f3a07717aa
+    cv_data_site_ids:
+      gmcep3: EP3
+      gmcir3: IR3
+    cv_expected_probe_counts:
+      gmcep3: 3
+      gmcir3: 4
+
+  pre_tasks:
+    - name: Require explicit nearby CV wave confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or cv_sensor_wave_confirm | bool
+          - ansible_play_batch | length == 1
+          - inventory_hostname in ['gmcep3', 'gmcir3']
+        fail_msg: >-
+          Run --check first, then pass -e cv_sensor_wave_confirm=true with an
+          explicit --limit. The wave is restricted to GMC EP3 and IR3.
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Load controller backup evidence
+      ansible.builtin.set_fact:
+        backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select this host backup activity
+      ansible.builtin.set_fact:
+        host_backup_status: >-
+          {{ backup_evidence.repository_status
+             | selectattr('repository', 'equalto', inventory_hostname)
+             | list | first | default({}) }}
+
+    - name: Enforce successful recent backup gate
+      ansible.builtin.assert:
+        that:
+          - backup_evidence.batch.result == 'success'
+          - backup_evidence.batch.timer_active | bool
+          - host_backup_status.activity_recent | default(false) | bool
+        fail_msg: "Current successful backup evidence is required before CV sensor replacement."
+
+    - name: Inspect current CV sensor program
+      ansible.builtin.stat:
+        path: "{{ cv_program_path }}"
+        checksum_algorithm: sha256
+      register: cv_program
+
+    - name: Inspect CV virtual-environment Python
+      ansible.builtin.stat:
+        path: "{{ cv_python_path }}"
+      register: cv_python
+
+    - name: Count current physical 1-Wire probes
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: physical_probes
+
+    - name: Verify CV rollout prerequisites
+      ansible.builtin.assert:
+        that:
+          - cv_program.stat.exists
+          - cv_program.stat.isreg
+          - cv_python.stat.exists
+          - cv_python.stat.executable
+          - physical_probes.matched | int == cv_expected_probe_counts[inventory_hostname]
+
+    - name: Verify restricted CV service helper
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ cv_helper_path }}", is-active]
+      become: false
+      check_mode: false
+      changed_when: false
+      register: helper_active
+
+    - name: Verify restricted CV journal access
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ cv_helper_path }}", logs, --since, "1 second ago", --lines, "1"]
+      become: false
+      check_mode: false
+      changed_when: false
+
+    - name: Capture CV telemetry before change
+      ansible.builtin.uri:
+        url: https://cv.coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: telemetry_before_response
+
+    - name: Select pre-change CV telemetry
+      ansible.builtin.set_fact:
+        telemetry_before: >-
+          {{ telemetry_before_response.json
+             | selectattr('id', 'equalto', cv_data_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require current pre-change CV telemetry
+      ansible.builtin.assert:
+        that:
+          - telemetry_before.id | default('') == cv_data_site_ids[inventory_hostname]
+          - not (telemetry_before.is_offline | default(true) | bool)
+          - telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Validate and stage canonical CV sensor program
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../roles/cv_sensor_code/files/cv_room_sensor.py"
+        dest: "{{ cv_program_path }}"
+        owner: "{{ cv_program.stat.pw_name }}"
+        group: "{{ cv_program.stat.gr_name }}"
+        mode: "{{ cv_program.stat.mode }}"
+        backup: true
+        validate: "{{ cv_python_path }} -m py_compile %s"
+      register: cv_sensor_copy
+
+    - name: Restart and verify changed CV sensor program
+      when:
+        - not ansible_check_mode
+        - cv_sensor_copy.changed
+      block:
+        - name: Restart CV sensor through restricted helper
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", restart]
+          become: false
+          changed_when: true
+
+        - name: Allow CV sensor startup
+          ansible.builtin.pause:
+            seconds: 12
+
+        - name: Verify CV sensor service is active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Read post-restart CV sensor logs
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", logs, --since, "2 minutes ago", --lines, "160"]
+          become: false
+          changed_when: false
+          register: cv_sensor_logs
+
+        - name: Prove all configured CV probes matched without startup errors
+          ansible.builtin.assert:
+            that:
+              - "'Traceback (most recent call last)' not in cv_sensor_logs.stdout"
+              - "'Configured ' not in cv_sensor_logs.stdout or ' sensor is missing:' not in cv_sensor_logs.stdout"
+              - >-
+                ('Matched ' ~ cv_expected_probe_counts[inventory_hostname] | string ~
+                 ' of ' ~ cv_expected_probe_counts[inventory_hostname] | string ~
+                 ' configured sensors') in cv_sensor_logs.stdout
+
+        - name: Verify installed canonical CV checksum
+          ansible.builtin.stat:
+            path: "{{ cv_program_path }}"
+            checksum_algorithm: sha256
+          register: cv_program_after
+
+        - name: Require canonical CV checksum
+          ansible.builtin.assert:
+            that:
+              - cv_program_after.stat.checksum == cv_target_sha256
+
+        - name: Wait for CV telemetry to advance
+          ansible.builtin.uri:
+            url: https://cv.coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: telemetry_after_response
+          until: >-
+            ((telemetry_after_response.json
+              | selectattr('id', 'equalto', cv_data_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+
+        - name: Select post-change CV telemetry
+          ansible.builtin.set_fact:
+            telemetry_after: >-
+              {{ telemetry_after_response.json
+                 | selectattr('id', 'equalto', cv_data_site_ids[inventory_hostname])
+                 | list | first | default({}) }}
+
+        - name: Prove mapped CV readings and telemetry advanced
+          ansible.builtin.assert:
+            that:
+              - not (telemetry_after.is_offline | default(true) | bool)
+              - telemetry_after.last_updated | int > telemetry_before.last_updated | int
+              - telemetry_after.helium_in is number
+              - telemetry_after.helium_out is number
+              - telemetry_after.primary_in is number
+              - cv_expected_probe_counts[inventory_hostname] | int < 4 or telemetry_after.primary_out is number
+
+      rescue:
+        - name: Restore automatic pre-change CV program copy
+          ansible.builtin.copy:
+            src: "{{ cv_sensor_copy.backup_file }}"
+            dest: "{{ cv_program_path }}"
+            remote_src: true
+            owner: "{{ cv_program.stat.pw_name }}"
+            group: "{{ cv_program.stat.gr_name }}"
+            mode: "{{ cv_program.stat.mode }}"
+          when: cv_sensor_copy.backup_file | default('') | length > 0
+
+        - name: Restart restored CV sensor program
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", restart]
+          become: false
+          when: cv_sensor_copy.backup_file | default('') | length > 0
+          changed_when: true
+
+        - name: Allow restored CV sensor recovery
+          ansible.builtin.pause:
+            seconds: 12
+
+        - name: Verify restored CV sensor is active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ cv_helper_path }}", is-active]
+          become: false
+          changed_when: false
+
+        - name: Stop serial CV wave after rollback
+          ansible.builtin.fail:
+            msg: >-
+              Post-change verification failed on {{ inventory_hostname }}; the
+              prior program was restored, its service recovered, and the wave stopped.

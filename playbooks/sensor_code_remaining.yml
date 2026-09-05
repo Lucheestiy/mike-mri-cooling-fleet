@@ -1,0 +1,7 @@
+---
+# Dedicated final MRI program wave. The imported play remains serial, requires
+# explicit confirmation, and refuses every host until backup_coverage.json shows
+# a successful recent repository snapshot.
+- import_playbook: sensor_code_wave_1.yml
+  vars:
+    sensor_wave_hosts: gcmcmr2:vwm2:vwm3

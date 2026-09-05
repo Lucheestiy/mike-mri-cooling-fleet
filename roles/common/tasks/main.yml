@@ -56,6 +56,18 @@
     - mri_user is defined
     - (mri_user | length) > 0
 
+- name: Install read-only CoolMRI Pi status helper
+  ansible.builtin.copy:
+    src: coolmri-pi-status
+    dest: "{{ pi_status.helper_path | default('/usr/local/sbin/coolmri-pi-status') }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - pi_status.enable_restricted_status_helper | default(true)
+    - mri_user is defined
+    - (mri_user | length) > 0
+
 - name: Install restricted sudoers entry for Pi disk backup helper
   ansible.builtin.template:
     src: mri-backup-disk.sudoers.j2
@@ -79,5 +91,18 @@
     validate: /usr/sbin/visudo -cf %s
   when:
     - mri_sensor_service.enable_restricted_service_helper | default(true)
+    - mri_user is defined
+    - (mri_user | length) > 0
+
+- name: Install restricted sudoers entry for read-only Pi status helper
+  ansible.builtin.template:
+    src: coolmri-pi-status.sudoers.j2
+    dest: "{{ pi_status.sudoers_path | default('/etc/sudoers.d/coolmri-pi-status') }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when:
+    - pi_status.enable_restricted_status_helper | default(true)
     - mri_user is defined
     - (mri_user | length) > 0

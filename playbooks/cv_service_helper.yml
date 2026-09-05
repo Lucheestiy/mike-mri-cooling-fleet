@@ -1,0 +1,7 @@
+- name: Install restricted CV sensor recovery helper
+  hosts: gmcep1and2:gmcep3:gmcir3
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  roles:
+    - role: cv_service_helper

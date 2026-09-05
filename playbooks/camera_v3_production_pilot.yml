@@ -1,0 +1,443 @@
+---
+- name: Transactionally converge an explicitly profiled nearby AGC camera agent to v3
+  hosts: "{{ camera_v3_production_target | default('agcmr3') }}"
+  gather_facts: false
+  become: false
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    camera_v3_production_confirm: false
+    camera_v3_production_target_effective: "{{ camera_v3_production_target | default('agcmr3') }}"
+    camera_v3_profiles:
+      agcmr1:
+        user: agcmr1
+        repository: agcmr1
+        site_id: AGCMR1
+        upload_mode: full_and_crop
+        debug_save_images: "true"
+        shutter_speed: "1500"
+        gain: "2.5"
+        crop_json: '{"x":708,"y":520,"w":364,"h":182}'
+        expected_current_hashes:
+          scheduled_capture.py: 56cd4b6e69a472d5b93dedb1f75cbde75817ce41d24e2fc47ad66ee6f690cf04
+          retry_failed_sessions.py: ef54f6689342c14f9680b1f38f15eac199edc31700cd71558187c80ca753c16f
+          run_scheduled_capture.sh: bc8d39b84fbdc147b08f76ec2b52692dc8f4ca8e8101fb3c3922f90c3595b8ec
+          run_retry_check.sh: 03d5fce36580cb0a165d0e418766889bf7608f65f0eedc685798b1de59c24120
+        expected_current_modes:
+          scheduled_capture.py: "0644"
+          retry_failed_sessions.py: "0644"
+          run_scheduled_capture.sh: "0755"
+          run_retry_check.sh: "0755"
+      agcmr3:
+        user: agcmr3
+        repository: agcmr3
+        site_id: AGCMR3
+        upload_mode: cropped_only
+        debug_save_images: "false"
+        shutter_speed: "1000"
+        gain: "0.5"
+        crop_json: '{"x":708,"y":520,"w":364,"h":182}'
+        expected_current_hashes:
+          scheduled_capture.py: 56cd4b6e69a472d5b93dedb1f75cbde75817ce41d24e2fc47ad66ee6f690cf04
+          retry_failed_sessions.py: ef54f6689342c14f9680b1f38f15eac199edc31700cd71558187c80ca753c16f
+          run_scheduled_capture.sh: bc8d39b84fbdc147b08f76ec2b52692dc8f4ca8e8101fb3c3922f90c3595b8ec
+          run_retry_check.sh: 03d5fce36580cb0a165d0e418766889bf7608f65f0eedc685798b1de59c24120
+        expected_current_modes:
+          scheduled_capture.py: "0644"
+          retry_failed_sessions.py: "0644"
+          run_scheduled_capture.sh: "0755"
+          run_retry_check.sh: "0755"
+    camera_v3_profile: "{{ camera_v3_profiles[camera_v3_production_target_effective] }}"
+    camera_user: "{{ camera_v3_profile.user }}"
+    camera_base: "/home/{{ camera_user }}/mri-cooling-camera"
+    camera_edge_dir: "{{ camera_base }}/edge"
+    camera_python: "{{ camera_base }}/venv/bin/python3"
+    camera_stage: "/dev/shm/coolmri-camera-v3-deploy-{{ camera_user }}"
+    camera_lock: /dev/shm/coolmri-camera-1000.lock
+    camera_repository: "{{ camera_v3_profile.repository }}"
+    camera_site_id: "{{ camera_v3_profile.site_id }}"
+    camera_expected_probe_count: 5
+    camera_expected_current_hashes: "{{ camera_v3_profile.expected_current_hashes }}"
+    camera_candidate_hashes:
+      scheduled_capture.py: 56cd4b6e69a472d5b93dedb1f75cbde75817ce41d24e2fc47ad66ee6f690cf04
+      retry_failed_sessions.py: ef54f6689342c14f9680b1f38f15eac199edc31700cd71558187c80ca753c16f
+      run_scheduled_capture.sh: bc8d39b84fbdc147b08f76ec2b52692dc8f4ca8e8101fb3c3922f90c3595b8ec
+      run_retry_check.sh: 03d5fce36580cb0a165d0e418766889bf7608f65f0eedc685798b1de59c24120
+    camera_expected_current_modes: "{{ camera_v3_profile.expected_current_modes }}"
+    camera_runtime_files:
+      - {name: scheduled_capture.py, mode: "0644"}
+      - {name: retry_failed_sessions.py, mode: "0644"}
+      - {name: run_scheduled_capture.sh, mode: "0755"}
+      - {name: run_retry_check.sh, mode: "0755"}
+    camera_env_content: |
+      # Managed by mri-cooling-pi-fleet camera v3 production pilot
+      CAMERA_BACKEND_URL=https://cam.coolmri.com/api/camera/pressure
+      SITE_ID={{ camera_site_id }}
+      IMAGE_WIDTH=1920
+      IMAGE_HEIGHT=1080
+      INTER_CAPTURE_DELAY_SEC=2
+      UPLOAD_ENABLED=true
+      UPLOAD_MODE={{ camera_v3_profile.upload_mode }}
+      OCR_CROP_COORDS={{ camera_v3_profile.crop_json }}
+      DEBUG_SAVE_IMAGES={{ camera_v3_profile.debug_save_images }}
+      DEBUG_RETAIN_IMAGES=20
+      RETRY_INTERVAL_SEC=300
+      RETRY_WINDOW_SEC=3600
+      RETRY_MAX_FILES=20
+      RETRY_MAX_BYTES=134217728
+      HTTP_TIMEOUT_SEC=180
+      HTTP_ATTEMPTS=3
+      SHUTTER_SPEED={{ camera_v3_profile.shutter_speed }}
+      GAIN={{ camera_v3_profile.gain }}
+      CAPTURES_PER_SESSION=10
+
+  pre_tasks:
+    - name: Require explicit production-pilot confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or camera_v3_production_confirm | bool
+          - camera_v3_production_target_effective in camera_v3_profiles
+          - inventory_hostname == camera_v3_production_target_effective
+        fail_msg: Run --check first, then pass camera_v3_production_confirm=true; this pilot is limited to explicitly reviewed AGC MR1/MR3 profiles.
+
+    - name: Load current controller backup evidence
+      ansible.builtin.set_fact:
+        camera_backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select profiled camera-host backup and restore evidence
+      ansible.builtin.set_fact:
+        camera_backup_status: >-
+          {{ camera_backup_evidence.repository_status
+             | selectattr('repository', 'equalto', camera_repository)
+             | list | first | default({}) }}
+        camera_restore_status: >-
+          {{ camera_backup_evidence.restore_tests
+             | selectattr('repository', 'equalto', camera_repository)
+             | list | first | default({}) }}
+
+    - name: Verify package manager is idle
+      ansible.builtin.shell: >-
+        ! systemctl is-active --quiet apt-daily-upgrade.service &&
+        ! systemctl is-active --quiet apt-daily.service &&
+        ! pgrep -x apt-get >/dev/null &&
+        ! pgrep -x dpkg >/dev/null &&
+        ! pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade$' >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Verify writable boot firmware and safe nearby Wi-Fi
+      ansible.builtin.shell: |
+        set -o pipefail
+        findmnt -n -o OPTIONS /boot/firmware | tr ',' '\n' | grep -qx rw
+        interface="$(ip route show default | awk 'NR == 1 {for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+        test -n "$interface"
+        if [ -d "/sys/class/net/$interface/wireless" ]; then
+          signal="$(iw dev "$interface" link | awk '/signal:/ {print int($2); exit}')"
+          test -n "$signal"
+          test "$signal" -gt -75
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Verify sensor, throttle, and camera process state
+      ansible.builtin.shell: |
+        set -o pipefail
+        systemctl is-active --quiet mri-sensor.service
+        test "$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l)" -eq "{{ camera_expected_probe_count }}"
+        test "$(vcgencmd get_throttled | sed 's/.*=//')" = "0x0"
+        ! pgrep -af '[s]cheduled_capture|[r]etry_failed|[r]picam-still|[l]ibcamera-still' >/dev/null
+        test "$(find '{{ camera_edge_dir }}/failed_sessions' -maxdepth 1 -type f | wc -l)" -eq 0
+        test "$(readlink -f '{{ camera_edge_dir }}/logs')" = "/run/coolmri-camera-logs/{{ camera_user }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Capture exact production crontab
+      ansible.builtin.command: crontab -l
+      register: camera_crontab_before
+      changed_when: false
+      check_mode: false
+
+    - name: Require the reviewed three-job AGC schedule
+      ansible.builtin.assert:
+        that:
+          - camera_crontab_before.stdout is search('(?m)^0 9 \\* \\* \\* .*run_scheduled_capture\\.sh')
+          - camera_crontab_before.stdout is search('(?m)^0 15 \\* \\* \\* .*run_scheduled_capture\\.sh')
+          - camera_crontab_before.stdout is search('(?m)^\\*/5 \\* \\* \\* \\* .*run_retry_check\\.sh')
+
+    - name: Inspect current production runtime files
+      ansible.builtin.stat:
+        path: "{{ camera_edge_dir }}/{{ item.name }}"
+        checksum_algorithm: sha256
+      loop: "{{ camera_runtime_files }}"
+      register: camera_runtime_before
+
+    - name: Require the reviewed current camera fingerprint
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.pw_name == camera_user
+          - item.stat.checksum == camera_expected_current_hashes[item.item.name]
+          - item.stat.mode == camera_expected_current_modes[item.item.name]
+      loop: "{{ camera_runtime_before.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Capture current runtime bytes for rollback
+      ansible.builtin.slurp:
+        src: "{{ camera_edge_dir }}/{{ item.name }}"
+      loop: "{{ camera_runtime_files }}"
+      register: camera_runtime_bytes_before
+      no_log: true
+
+    - name: Inspect current environment metadata for exact rollback
+      ansible.builtin.stat:
+        path: "{{ camera_edge_dir }}/.env"
+      register: camera_env_before
+
+    - name: Require the environment to be owned by the camera account
+      ansible.builtin.assert:
+        that:
+          - camera_env_before.stat.exists
+          - camera_env_before.stat.isreg
+          - camera_env_before.stat.pw_name == camera_user
+
+    - name: Capture current environment bytes for rollback
+      ansible.builtin.slurp:
+        src: "{{ camera_edge_dir }}/.env"
+      register: camera_env_bytes_before
+      no_log: true
+
+    - name: Capture current MRI telemetry
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      register: camera_telemetry_before_response
+      changed_when: false
+      check_mode: false
+
+    - name: Select current profiled-site telemetry
+      ansible.builtin.set_fact:
+        camera_telemetry_before: >-
+          {{ camera_telemetry_before_response.json
+             | selectattr('id', 'equalto', camera_site_id)
+             | list | first | default({}) }}
+
+    - name: Require current profiled-site telemetry
+      ansible.builtin.assert:
+        that:
+          - camera_telemetry_before.id | default('') == camera_site_id
+          - not (camera_telemetry_before.is_offline | default(true) | bool)
+          - camera_telemetry_before.last_updated | default(0) | int > 0
+
+    - name: Require current backup and production restore proof
+      ansible.builtin.assert:
+        that:
+          - camera_backup_evidence.batch.result == 'success'
+          - camera_backup_evidence.batch.timer_active | bool
+          - camera_backup_status.activity_recent | default(false) | bool
+          - camera_restore_status.status | default('') == 'success'
+          - camera_restore_status.recent | default(false) | bool
+        fail_msg: The selected camera host requires a recent backup and successful production restore test before its working camera agent can be replaced.
+
+  tasks:
+    - name: Stage candidate and byte-exact rollback files in tmpfs
+      block:
+        - name: Create private tmpfs staging directories
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0700"
+          loop:
+            - "{{ camera_stage }}"
+            - "{{ camera_stage }}/candidate"
+            - "{{ camera_stage }}/original"
+
+        - name: Stage reviewed v3 runtime files
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../roles/camera_edge/files/edge/{{ item.name }}"
+            dest: "{{ camera_stage }}/candidate/{{ item.name }}"
+            mode: "{{ item.mode }}"
+          loop: "{{ camera_runtime_files }}"
+
+        - name: Stage reviewed v3 environment
+          ansible.builtin.copy:
+            content: "{{ camera_env_content }}"
+            dest: "{{ camera_stage }}/candidate/.env"
+            mode: "0600"
+
+        - name: Stage original runtime bytes for rollback
+          ansible.builtin.copy:
+            content: "{{ item.content | b64decode }}"
+            dest: "{{ camera_stage }}/original/{{ item.item.name }}"
+            mode: "{{ camera_expected_current_modes[item.item.name] }}"
+          loop: "{{ camera_runtime_bytes_before.results }}"
+          no_log: true
+
+        - name: Stage original environment bytes for rollback
+          ansible.builtin.copy:
+            content: "{{ camera_env_bytes_before.content | b64decode }}"
+            dest: "{{ camera_stage }}/original/.env"
+            mode: "0600"
+          no_log: true
+
+        - name: Compile staged Python and verify candidate hashes
+          ansible.builtin.shell: |
+            set -o pipefail
+            "{{ camera_python }}" -m py_compile \
+              "{{ camera_stage }}/candidate/scheduled_capture.py" \
+              "{{ camera_stage }}/candidate/retry_failed_sessions.py"
+            cd "{{ camera_stage }}/candidate"
+            sha256sum -c <<'EOF'
+            {{ camera_candidate_hashes['scheduled_capture.py'] }}  scheduled_capture.py
+            {{ camera_candidate_hashes['retry_failed_sessions.py'] }}  retry_failed_sessions.py
+            {{ camera_candidate_hashes['run_scheduled_capture.sh'] }}  run_scheduled_capture.sh
+            {{ camera_candidate_hashes['run_retry_check.sh'] }}  run_retry_check.sh
+            EOF
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Atomically replace runtime under the production camera lock
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            exec 9>"{{ camera_lock }}"
+            flock -n 9
+            touch "{{ camera_stage }}/replacement-started"
+            install -m 0644 "{{ camera_stage }}/candidate/scheduled_capture.py" "{{ camera_edge_dir }}/scheduled_capture.py"
+            install -m 0644 "{{ camera_stage }}/candidate/retry_failed_sessions.py" "{{ camera_edge_dir }}/retry_failed_sessions.py"
+            install -m 0755 "{{ camera_stage }}/candidate/run_scheduled_capture.sh" "{{ camera_edge_dir }}/run_scheduled_capture.sh"
+            install -m 0755 "{{ camera_stage }}/candidate/run_retry_check.sh" "{{ camera_edge_dir }}/run_retry_check.sh"
+            install -m 0600 "{{ camera_stage }}/candidate/.env" "{{ camera_edge_dir }}/.env"
+          args:
+            executable: /bin/bash
+          when: not ansible_check_mode
+          changed_when: true
+
+        - name: Run one upload-disabled smoke capture from installed v3
+          ansible.builtin.command:
+            argv: ["{{ camera_python }}", "{{ camera_edge_dir }}/scheduled_capture.py"]
+          environment:
+            PYTHONDONTWRITEBYTECODE: "1"
+            CAMERA_BASE_DIR: "{{ camera_stage }}/smoke"
+            CAMERA_BACKEND_URL: https://cam.coolmri.com/api/camera/pressure
+            SITE_ID: "{{ camera_site_id }}-SMOKE"
+            UPLOAD_ENABLED: "false"
+            UPLOAD_MODE: "{{ camera_v3_profile.upload_mode }}"
+            IMAGE_WIDTH: "1920"
+            IMAGE_HEIGHT: "1080"
+            OCR_CROP_COORDS: "{{ camera_v3_profile.crop_json }}"
+            SHUTTER_SPEED: "{{ camera_v3_profile.shutter_speed }}"
+            GAIN: "{{ camera_v3_profile.gain }}"
+            CAPTURES_PER_SESSION: "1"
+            INTER_CAPTURE_DELAY_SEC: "0"
+            DEBUG_SAVE_IMAGES: "false"
+          register: camera_smoke_result
+          when: not ansible_check_mode
+          changed_when: true
+
+        - name: Require successful no-upload smoke evidence
+          ansible.builtin.assert:
+            that:
+              - camera_smoke_result.rc == 0
+              - "'captured=1 uploaded=0 requested=1' in camera_smoke_result.stderr"
+          when: not ansible_check_mode
+
+        - name: Inspect installed v3 runtime files
+          ansible.builtin.stat:
+            path: "{{ camera_edge_dir }}/{{ item.name }}"
+            checksum_algorithm: sha256
+          loop: "{{ camera_runtime_files }}"
+          register: camera_runtime_after
+          when: not ansible_check_mode
+
+        - name: Prove exact v3 installation
+          ansible.builtin.assert:
+            that:
+              - item.stat.checksum == camera_candidate_hashes[item.item.name]
+          loop: "{{ camera_runtime_after.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.name }}"
+          when: not ansible_check_mode
+
+        - name: Re-read production crontab
+          ansible.builtin.command: crontab -l
+          register: camera_crontab_after
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Recheck sensor, probe, RAM-log, retry, and throttle state
+          ansible.builtin.shell: |
+            set -o pipefail
+            systemctl is-active --quiet mri-sensor.service
+            test "$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l)" -eq "{{ camera_expected_probe_count }}"
+            test "$(vcgencmd get_throttled | sed 's/.*=//')" = "0x0"
+            test "$(find '{{ camera_edge_dir }}/failed_sessions' -maxdepth 1 -type f | wc -l)" -eq 0
+            test "$(readlink -f '{{ camera_edge_dir }}/logs')" = "/run/coolmri-camera-logs/{{ camera_user }}"
+          args:
+            executable: /bin/bash
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Prove the exact camera schedule was preserved
+          ansible.builtin.assert:
+            that:
+              - camera_crontab_after.stdout == camera_crontab_before.stdout
+          when: not ansible_check_mode
+
+        - name: Wait for unaffected MRI telemetry to advance
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          register: camera_telemetry_after_response
+          until: >-
+            ((camera_telemetry_after_response.json
+              | selectattr('id', 'equalto', camera_site_id)
+              | list | first | default({})).last_updated | default(0) | int)
+            > (camera_telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Check whether production replacement began
+          ansible.builtin.stat:
+            path: "{{ camera_stage }}/replacement-started"
+          register: camera_replacement_marker
+
+        - name: Restore byte-exact prior runtime under the camera lock
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            exec 9>"{{ camera_lock }}"
+            flock -w 30 9
+            install -m "{{ camera_expected_current_modes['scheduled_capture.py'] }}" "{{ camera_stage }}/original/scheduled_capture.py" "{{ camera_edge_dir }}/scheduled_capture.py"
+            install -m "{{ camera_expected_current_modes['retry_failed_sessions.py'] }}" "{{ camera_stage }}/original/retry_failed_sessions.py" "{{ camera_edge_dir }}/retry_failed_sessions.py"
+            install -m "{{ camera_expected_current_modes['run_scheduled_capture.sh'] }}" "{{ camera_stage }}/original/run_scheduled_capture.sh" "{{ camera_edge_dir }}/run_scheduled_capture.sh"
+            install -m "{{ camera_expected_current_modes['run_retry_check.sh'] }}" "{{ camera_stage }}/original/run_retry_check.sh" "{{ camera_edge_dir }}/run_retry_check.sh"
+            install -m "{{ camera_env_before.stat.mode }}" "{{ camera_stage }}/original/.env" "{{ camera_edge_dir }}/.env"
+          args:
+            executable: /bin/bash
+          when:
+            - not ansible_check_mode
+            - camera_replacement_marker.stat.exists | default(false)
+          changed_when: true
+
+        - name: Stop after verified rollback
+          ansible.builtin.fail:
+            msg: Camera v3 verification failed; the byte-exact prior runtime and environment were restored.
+
+      always:
+        - name: Remove private tmpfs deployment and smoke data
+          ansible.builtin.file:
+            path: "{{ camera_stage }}"
+            state: absent

@@ -1,0 +1,140 @@
+---
+- name: Pause user-crontab camera jobs during log-path transition
+  ansible.builtin.include_tasks: remove_cron.yml
+  when: camera_ram_logs_schedule_strategy == 'user_crontab'
+
+- name: Pause cron under watchdog during cron.d log-path transition
+  ansible.builtin.include_tasks: pause_cron_service.yml
+  when: camera_ram_logs_schedule_strategy == 'cron_service_watchdog'
+
+- name: Transition camera logs to bounded runtime storage
+  block:
+    - name: Install tmpfiles rule for camera RAM logs
+      ansible.builtin.template:
+        src: coolmri-camera-logs.tmpfiles.j2
+        dest: "/etc/tmpfiles.d/coolmri-camera-logs-{{ mri_user }}.conf"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install bounded runtime camera log rotation
+      ansible.builtin.template:
+        src: coolmri-camera-logs.logrotate.j2
+        dest: "/etc/logrotate.d/coolmri-camera-logs-{{ mri_user }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create camera runtime log directory
+      ansible.builtin.file:
+        path: "{{ camera_ram_logs_runtime_dir }}"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0750"
+
+    - name: Inspect current camera log path
+      ansible.builtin.stat:
+        path: "{{ camera_ram_logs_edge_dir }}/logs"
+        follow: false
+      register: camera_logs_path
+
+    - name: Inspect preserved persistent log archive
+      ansible.builtin.stat:
+        path: "{{ camera_ram_logs_archive_dir }}"
+      register: camera_logs_archive
+
+    - name: Refuse to overwrite an existing archive
+      ansible.builtin.assert:
+        that:
+          - not (camera_logs_path.stat.exists and not camera_logs_path.stat.islnk and camera_logs_archive.stat.exists)
+        fail_msg: "Both active persistent logs and the pilot archive exist; inspect them manually."
+
+    - name: Preserve historical camera logs by rename
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ camera_ram_logs_edge_dir }}/logs"
+          - "{{ camera_ram_logs_archive_dir }}"
+      args:
+        creates: "{{ camera_ram_logs_archive_dir }}"
+      when:
+        - camera_logs_path.stat.exists
+        - not camera_logs_path.stat.islnk
+
+    - name: Link camera logs to runtime storage
+      ansible.builtin.file:
+        src: "{{ camera_ram_logs_runtime_dir }}"
+        dest: "{{ camera_ram_logs_edge_dir }}/logs"
+        state: link
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        force: false
+      when: not ansible_check_mode
+
+  rescue:
+    - name: Inspect camera log path after failed transition
+      ansible.builtin.stat:
+        path: "{{ camera_ram_logs_edge_dir }}/logs"
+        follow: false
+      register: failed_camera_logs_path
+
+    - name: Restore historical log directory after failed transition
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ camera_ram_logs_archive_dir }}"
+          - "{{ camera_ram_logs_edge_dir }}/logs"
+      when:
+        - not failed_camera_logs_path.stat.exists
+        - camera_logs_archive.stat.exists | default(false)
+
+    - name: Stop after restoring failed transition
+      ansible.builtin.fail:
+        msg: Camera RAM-log transition failed and was rolled back.
+
+  always:
+    - name: Restore camera user crontab after transition
+      ansible.builtin.include_tasks: restore_cron.yml
+      when: camera_ram_logs_schedule_strategy == 'user_crontab'
+
+    - name: Restore cron service after cron.d transition
+      ansible.builtin.include_tasks: restore_cron_service.yml
+      when: camera_ram_logs_schedule_strategy == 'cron_service_watchdog'
+
+- name: Inspect active RAM-log link after transition
+  ansible.builtin.stat:
+    path: "{{ camera_ram_logs_edge_dir }}/logs"
+    follow: false
+  register: camera_ram_logs_link_after
+  when: not ansible_check_mode
+
+- name: Confirm runtime storage filesystem
+  ansible.builtin.command:
+    argv: [findmnt, -n, -o, FSTYPE, -T, "{{ camera_ram_logs_runtime_dir }}"]
+  register: camera_ram_logs_fstype_after
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Capture restored camera-user crontab
+  ansible.builtin.command:
+    argv: [crontab, -u, "{{ mri_user }}", -l]
+  register: camera_ram_logs_crontab_after
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - camera_ram_logs_schedule_strategy == 'user_crontab'
+
+- name: Prove RAM logging and exact schedule preservation
+  ansible.builtin.assert:
+    that:
+      - camera_ram_logs_link_after.stat.islnk | default(false)
+      - camera_ram_logs_link_after.stat.lnk_source == camera_ram_logs_runtime_dir
+      - camera_ram_logs_fstype_after.stdout == 'tmpfs'
+      - >-
+        camera_ram_logs_schedule_strategy == 'cron_service_watchdog'
+        or camera_ram_logs_crontab_after.stdout == camera_ram_logs_crontab_before.stdout
+    fail_msg: >-
+      Camera RAM-log verification failed; use the restricted rollback playbook
+      before further camera work.
+  when: not ansible_check_mode

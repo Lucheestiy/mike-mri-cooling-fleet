@@ -5,6 +5,12 @@ groups:
       - agcmr1
       - agcmr2
       - agcmr3
+  ir-ep:
+    description: GMC IR/EP Raspberry Pi hosts
+    members:
+      - gmcep1and2
+      - gmcep3
+      - gmcir3
   woodbine:
     description: Woodbine MRI sites
     members:
@@ -28,6 +34,7 @@ groups:
     description: Combined Geisinger hospital and imaging hosts
     members:
       - agc
+      - ir-ep
       - gmc
       - gcmc-sites
       - gbh
@@ -56,3 +63,35 @@ groups:
   cameras:
     description: Dedicated camera/OCR Pi hosts
     members:
+  cv:
+    description: Cardiovascular equipment-room sensor Pis publishing to cv.coolmri.com
+    members:
+      - gmcep1and2
+      - gmcep3
+      - gmcir3
+  pilot-gmc:
+    description: Nearby staged rollout group selected by the operator; always change one host at a time
+    members:
+      - agcmr1
+      - agcmr2
+      - agcmr3
+  mri:
+    description: MRI cooling Pis publishing to coolmri.com
+    members:
+      - agc
+      - woodbine
+      - svi
+      - gcmc-sites
+      - pittston
+      - vwm
+      - gbh
+      - shmr
+      - muncymr
+      - jsmr
+      - phc
+      - phmv
+      - gr
+      - gswbsola
+      - gwvs
+      - gwvskyra
+      - glh

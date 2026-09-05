@@ -1,0 +1,310 @@
+- name: Converge backed-up MRI sensor code rollout
+  hosts: "{{ sensor_wave_hosts | default('oswmr1:oswmr2:svimr1:svimr2:gbh:shmr:muncymr:jsmr:gr:gcmcsola:gswbsola:gwvskyra') }}"
+  gather_facts: false
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    sensor_wave_confirm: false
+    sensor_program_path: "/home/{{ ansible_user }}/mike-mri-cooling/src/pi_sensor.py"
+    sensor_env_path: "/home/{{ ansible_user }}/mike-mri-cooling/.env"
+    sensor_offsets_path: "/home/{{ ansible_user }}/mike-mri-cooling/src/sensor_offsets.json"
+    sensor_python_path: "/home/{{ ansible_user }}/mike-mri-cooling/venv/bin/python3"
+    sensor_helper_path: /usr/local/sbin/mri-sensor-service
+    sensor_allowed_source_sha256:
+      # Approved resilient build (idempotent rerun).
+      - 0d939f88b35ab8167ce1e70d91a8611a14f4a6a9631a30677bbe06bb5234a36f
+      # Reviewed legacy static-discovery build on the final three MRI hosts.
+      - e48e6230bb122a3c79bea77a02da75ad63306f97564d1486615ae6759053bee0
+    mri_data_site_ids:
+      oswmr1: OSWMR1
+      oswmr2: OSWMR2
+      svimr1: SVIMR1
+      svimr2: SVIMR2
+      gbh: GBHAera
+      shmr: SHMR
+      muncymr: MuncySola
+      jsmr: JerseyShoreMR
+      gr: GR
+      gcmcsola: GCMCSola
+      gswbsola: GSWBSola
+      gwvskyra: GWVSkyra
+      gcmcmr2: GCMCMR2
+      vwm2: VWM2
+      vwm3: VWM3
+    backup_repositories:
+      oswmr1: oswmr1
+      oswmr2: oswmr2nvme
+      svimr1: svimr1
+      svimr2: svimr2
+      gbh: gbh
+      shmr: shmr
+      muncymr: muncymr
+      jsmr: jsmr
+      gr: gr
+      gcmcsola: gcmc-sola
+      gswbsola: gswb-sola
+      gwvskyra: gwv-skyra
+      gcmcmr2: gcmcmr2
+      vwm2: vwm2
+      vwm3: vwm3
+
+  pre_tasks:
+    - name: Require explicit confirmation outside check mode
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or sensor_wave_confirm | bool
+        fail_msg: "Run --check first, then pass -e sensor_wave_confirm=true to apply."
+
+    - name: Load controller backup evidence
+      ansible.builtin.set_fact:
+        backup_evidence: "{{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}"
+
+    - name: Select this host backup activity
+      ansible.builtin.set_fact:
+        host_backup_status: >-
+          {{ backup_evidence.repository_status
+             | selectattr('repository', 'equalto', backup_repositories[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Enforce successful recent backup gate
+      ansible.builtin.assert:
+        that:
+          - backup_evidence.batch.result == 'success'
+          - backup_evidence.batch.timer_active | bool
+          - host_backup_status.activity_recent | default(false) | bool
+        fail_msg: "Current successful backup evidence is required before sensor code replacement."
+
+    - name: Read default-route Wi-Fi signal
+      ansible.builtin.shell: |
+        set -o pipefail
+        interface="$(ip route show default | awk 'NR == 1 {for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+        test -n "$interface"
+        if [ ! -d "/sys/class/net/$interface/wireless" ]; then
+          printf '0\n'
+          exit 0
+        fi
+        iw dev "$interface" link | awk '/signal:/ {print int($2); found=1} END {if (!found) exit 1}'
+      args:
+        executable: /bin/bash
+      register: sensor_wave_wifi_signal
+      changed_when: false
+      check_mode: false
+
+    - name: Report marginal remote Wi-Fi as an advisory
+      ansible.builtin.debug:
+        msg: >-
+          Default-route Wi-Fi is {{ sensor_wave_wifi_signal.stdout }} dBm. Continue
+          with the backup, probe, rollback, service, and telemetry gates; recommend
+          an external-antenna USB adapter or Ethernet without blocking maintenance.
+      when: sensor_wave_wifi_signal.stdout | int <= -67
+
+    - name: Inspect current sensor program
+      ansible.builtin.stat:
+        path: "{{ sensor_program_path }}"
+        checksum_algorithm: sha256
+      register: sensor_program
+
+    - name: Capture protected site configuration checksums
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - "{{ sensor_env_path }}"
+        - "{{ sensor_offsets_path }}"
+      register: sensor_site_files_before
+
+    - name: Capture exact physical probe set
+      ansible.builtin.find:
+        paths: /sys/bus/w1/devices
+        patterns: "28-*"
+        file_type: link
+        recurse: false
+      register: sensor_probes_before
+
+    - name: Inspect sensor virtual-environment Python
+      ansible.builtin.stat:
+        path: "{{ sensor_python_path }}"
+      register: sensor_python
+
+    - name: Verify file ownership and rollout prerequisites
+      ansible.builtin.assert:
+        that:
+          - sensor_program.stat.exists
+          - sensor_program.stat.isreg
+          - sensor_program.stat.pw_name == ansible_user
+          - sensor_program.stat.checksum in sensor_allowed_source_sha256
+          - sensor_python.stat.exists
+          - sensor_python.stat.executable
+          - sensor_site_files_before.results | map(attribute='stat.exists') | list | min
+        fail_msg: >-
+          Refusing sensor replacement: the source program is not an explicitly
+          reviewed MRI family, protected site files are missing, or the production
+          interpreter/ownership contract differs.
+
+    - name: Verify restricted service helper
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ sensor_helper_path }}", status]
+      register: helper_status
+      check_mode: false
+      changed_when: false
+      failed_when: helper_status.rc not in [0, 3]
+
+    - name: Detect restricted journal access
+      ansible.builtin.command:
+        argv: [sudo, -n, "{{ sensor_helper_path }}", recent-logs]
+      register: helper_logs_status
+      check_mode: false
+      changed_when: false
+      failed_when: false
+
+    - name: Capture server telemetry before change
+      ansible.builtin.uri:
+        url: https://coolmri.com/api/sites/snapshot
+        return_content: true
+        timeout: 15
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      register: telemetry_before_response
+
+    - name: Select pre-change site telemetry
+      ansible.builtin.set_fact:
+        telemetry_before: >-
+          {{ telemetry_before_response.json
+             | selectattr('id', 'equalto', mri_data_site_ids[inventory_hostname])
+             | list | first | default({}) }}
+
+    - name: Require current pre-change telemetry
+      ansible.builtin.assert:
+        that:
+          - telemetry_before.id | default('') == mri_data_site_ids[inventory_hostname]
+          - not (telemetry_before.is_offline | default(true) | bool)
+          - telemetry_before.last_updated | default(0) | int > 0
+
+  tasks:
+    - name: Validate proposed sensor program in check mode
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../roles/temp_sensors/files/pi_sensor.py"
+        dest: "{{ sensor_program_path }}"
+        owner: "{{ sensor_program.stat.pw_name }}"
+        group: "{{ sensor_program.stat.gr_name }}"
+        mode: "{{ sensor_program.stat.mode }}"
+        backup: true
+        validate: "{{ sensor_python_path }} -m py_compile %s"
+      register: sensor_copy
+
+    - name: Restart and verify changed sensor program
+      when:
+        - not ansible_check_mode
+        - sensor_copy.changed
+      block:
+        - name: Restart sensor service through restricted helper
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_path }}", restart]
+          changed_when: true
+
+        - name: Allow initial sensor startup
+          ansible.builtin.pause:
+            seconds: 10
+
+        - name: Verify sensor service is active
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_path }}", status]
+          changed_when: false
+
+        - name: Read post-restart sensor logs
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_path }}", recent-logs]
+          changed_when: false
+          register: sensor_logs
+          when: helper_logs_status.rc == 0
+
+        - name: Reject startup tracebacks and missing required probes
+          ansible.builtin.assert:
+            that:
+              - "'Traceback (most recent call last)' not in sensor_logs.stdout"
+              - "'Missing required sensors' not in sensor_logs.stdout"
+              - "'failed after' not in sensor_logs.stdout"
+          when: helper_logs_status.rc == 0
+
+        - name: Wait for server telemetry to advance
+          ansible.builtin.uri:
+            url: https://coolmri.com/api/sites/snapshot
+            return_content: true
+            timeout: 15
+          delegate_to: localhost
+          become: false
+          register: telemetry_after_response
+          until: >-
+            ((telemetry_after_response.json
+              | selectattr('id', 'equalto', mri_data_site_ids[inventory_hostname])
+              | list | first | default({})).last_updated | default(0) | int)
+            > (telemetry_before.last_updated | int)
+          retries: 12
+          delay: 10
+
+        - name: Re-read protected site configuration checksums
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: sha256
+          loop:
+            - "{{ sensor_env_path }}"
+            - "{{ sensor_offsets_path }}"
+          register: sensor_site_files_after
+
+        - name: Re-read exact physical probe set
+          ansible.builtin.find:
+            paths: /sys/bus/w1/devices
+            patterns: "28-*"
+            file_type: link
+            recurse: false
+          register: sensor_probes_after
+
+        - name: Inspect converged sensor program checksum
+          ansible.builtin.stat:
+            path: "{{ sensor_program_path }}"
+            checksum_algorithm: sha256
+          register: sensor_program_after
+
+        - name: Prove program convergence without site-state drift
+          ansible.builtin.assert:
+            that:
+              - sensor_program_after.stat.checksum == '0d939f88b35ab8167ce1e70d91a8611a14f4a6a9631a30677bbe06bb5234a36f'
+              - sensor_site_files_after.results | map(attribute='stat.checksum') | list == sensor_site_files_before.results | map(attribute='stat.checksum') | list
+              - sensor_probes_after.files | map(attribute='path') | map('basename') | sort | list == sensor_probes_before.files | map(attribute='path') | map('basename') | sort | list
+              - sensor_probes_after.matched | int == sensor_probes_before.matched | int
+
+        - name: Select post-change site telemetry
+          ansible.builtin.set_fact:
+            telemetry_after: >-
+              {{ telemetry_after_response.json
+                 | selectattr('id', 'equalto', mri_data_site_ids[inventory_hostname])
+                 | list | first | default({}) }}
+
+        - name: Prove telemetry advanced after restart
+          ansible.builtin.assert:
+            that:
+              - telemetry_after.id | default('') == mri_data_site_ids[inventory_hostname]
+              - not (telemetry_after.is_offline | default(true) | bool)
+              - telemetry_after.last_updated | default(0) | int > telemetry_before.last_updated | int
+
+      rescue:
+        - name: Restore the automatic pre-change copy
+          ansible.builtin.copy:
+            src: "{{ sensor_copy.backup_file }}"
+            dest: "{{ sensor_program_path }}"
+            remote_src: true
+            owner: "{{ sensor_program.stat.pw_name }}"
+            group: "{{ sensor_program.stat.gr_name }}"
+            mode: "{{ sensor_program.stat.mode }}"
+          when: sensor_copy.backup_file | default('') | length > 0
+
+        - name: Restart restored sensor program
+          ansible.builtin.command:
+            argv: [sudo, -n, "{{ sensor_helper_path }}", restart]
+          when: sensor_copy.backup_file | default('') | length > 0
+          changed_when: true
+
+        - name: Stop the serial wave after rollback
+          ansible.builtin.fail:
+            msg: "Post-change verification failed on {{ inventory_hostname }}; the prior program was restored and the wave stopped."

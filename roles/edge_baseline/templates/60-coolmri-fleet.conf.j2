@@ -1,0 +1,10 @@
+# Managed by mri-cooling-pi-fleet.
+# Sensor applications log to stdout/RAM; this bounds remaining system journal writes.
+[Journal]
+Storage={{ edge_baseline.journal_storage }}
+SystemMaxUse={{ edge_baseline.journal_system_max_use }}
+RuntimeMaxUse={{ edge_baseline.journal_runtime_max_use }}
+MaxFileSec={{ edge_baseline.journal_max_file_sec }}
+MaxRetentionSec={{ edge_baseline.journal_max_retention_sec }}
+Compress=yes
+Seal=yes

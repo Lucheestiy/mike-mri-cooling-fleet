@@ -1,0 +1,185 @@
+---
+- name: Move nearby AGC camera logs to RAM
+  hosts: agcmr1:agcmr3
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    ansible_become_exe: "/home/{{ mri_user }}/.local/bin/sudo-rs-ansible-compat"
+    camera_pilot_site_ids:
+      agcmr1: AGCMR1
+      agcmr3: AGCMR3
+    camera_pilot_telemetry_url: https://coolmri.com/api/sites/snapshot
+    camera_pilot_sensor_path: "/home/{{ mri_user }}/mike-mri-cooling/src/pi_sensor.py"
+    camera_pilot_runtime_paths:
+      - "/home/{{ mri_user }}/mri-cooling-camera/edge/scheduled_capture.py"
+      - "/home/{{ mri_user }}/mri-cooling-camera/edge/retry_failed_sessions.py"
+      - "/home/{{ mri_user }}/mri-cooling-camera/edge/run_scheduled_capture.sh"
+      - "/home/{{ mri_user }}/mri-cooling-camera/edge/run_retry_check.sh"
+    camera_pilot_backup: >-
+      {{ lookup('ansible.builtin.file', playbook_dir + '/../reports/backup_coverage.json') | from_json }}
+    camera_pilot_repo_status: >-
+      {{ camera_pilot_backup.repository_status
+         | selectattr('repository', 'equalto', inventory_hostname)
+         | first | default({}) }}
+  pre_tasks:
+    - name: Require explicit backed-up nearby-pilot confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or camera_ram_logs_pilot_confirm | default(false) | bool
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname in ['agcmr1', 'agcmr3']
+          - inventory_hostname in camera_pilot_backup.repositories
+          - camera_pilot_repo_status.activity_recent | default(false) | bool
+          - camera_pilot_backup.batch.result == 'success'
+        fail_msg: >-
+          This playbook is restricted to one backed-up nearby AGC MR host. Pass
+          -e camera_ram_logs_pilot_confirm=true after preflight.
+
+    - name: Ensure unprivileged compatibility directory exists
+      ansible.builtin.file:
+        path: "/home/{{ mri_user }}/.local/bin"
+        state: directory
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Install sudo-rs prompt compatibility shim
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/sudo-rs-ansible-compat"
+        dest: "{{ ansible_become_exe }}"
+        owner: "{{ mri_user }}"
+        group: "{{ mri_user }}"
+        mode: "0700"
+      become: false
+      check_mode: false
+
+    - name: Require package manager to be idle
+      ansible.builtin.shell: >-
+        if systemctl is-active --quiet apt-daily.service apt-daily-upgrade.service
+        || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null
+        || pgrep -f '^/usr/bin/python3 /usr/bin/unattended-upgrade$' >/dev/null;
+        then printf busy; else printf idle; fi
+      args:
+        executable: /bin/bash
+      register: camera_pilot_package_state
+      changed_when: false
+      check_mode: false
+      failed_when: camera_pilot_package_state.stdout != 'idle'
+
+    - name: Capture protected application hashes
+      ansible.builtin.command:
+        argv: "{{ ['sha256sum', camera_pilot_sensor_path] + camera_pilot_runtime_paths }}"
+      register: camera_pilot_hashes_before
+      changed_when: false
+      check_mode: false
+
+    - name: Require active MRI sensor service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, mri-sensor.service]
+      register: camera_pilot_sensor_service_before
+      changed_when: false
+      check_mode: false
+
+    - name: Count exact 1-Wire probes
+      ansible.builtin.shell: >-
+        find /sys/bus/w1/devices -mindepth 1 -maxdepth 1 -type l -name '28-*' | wc -l
+      args:
+        executable: /bin/bash
+      register: camera_pilot_probes_before
+      changed_when: false
+      check_mode: false
+
+    - name: Require zero current and historical throttle flags
+      ansible.builtin.command:
+        argv: [vcgencmd, get_throttled]
+      register: camera_pilot_throttle_before
+      changed_when: false
+      check_mode: false
+
+    - name: Capture current MRI telemetry
+      ansible.builtin.uri:
+        url: "{{ camera_pilot_telemetry_url }}"
+        return_content: true
+        timeout: 15
+      register: camera_pilot_telemetry_before_response
+      delegate_to: localhost
+      become: false
+      check_mode: false
+
+    - name: Select current site telemetry
+      ansible.builtin.set_fact:
+        camera_pilot_telemetry_before: >-
+          {{ camera_pilot_telemetry_before_response.json
+             | selectattr('id', 'equalto', camera_pilot_site_ids[inventory_hostname])
+             | first | default({}) }}
+
+    - name: Prove complete pre-transition health
+      ansible.builtin.assert:
+        that:
+          - camera_pilot_sensor_service_before.stdout == 'active'
+          - camera_pilot_probes_before.stdout | int == 5
+          - camera_pilot_throttle_before.stdout | trim == 'throttled=0x0'
+          - camera_pilot_telemetry_before.id | default('') == camera_pilot_site_ids[inventory_hostname]
+          - not (camera_pilot_telemetry_before.is_offline | default(true) | bool)
+          - camera_pilot_telemetry_before.last_updated | default(0) | int > 0
+  roles:
+    - camera_ram_logs
+
+  post_tasks:
+    - name: Re-read protected application hashes
+      ansible.builtin.command:
+        argv: "{{ ['sha256sum', camera_pilot_sensor_path] + camera_pilot_runtime_paths }}"
+      register: camera_pilot_hashes_after
+      changed_when: false
+      check_mode: false
+
+    - name: Recheck MRI service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, mri-sensor.service]
+      register: camera_pilot_sensor_service_after
+      changed_when: false
+      check_mode: false
+
+    - name: Recount exact 1-Wire probes
+      ansible.builtin.shell: >-
+        find /sys/bus/w1/devices -mindepth 1 -maxdepth 1 -type l -name '28-*' | wc -l
+      args:
+        executable: /bin/bash
+      register: camera_pilot_probes_after
+      changed_when: false
+      check_mode: false
+
+    - name: Recheck throttle flags
+      ansible.builtin.command:
+        argv: [vcgencmd, get_throttled]
+      register: camera_pilot_throttle_after
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for MRI telemetry to advance
+      ansible.builtin.uri:
+        url: "{{ camera_pilot_telemetry_url }}"
+        return_content: true
+        timeout: 15
+      register: camera_pilot_telemetry_after_response
+      until: >-
+        ((camera_pilot_telemetry_after_response.json
+          | selectattr('id', 'equalto', camera_pilot_site_ids[inventory_hostname])
+          | first | default({})).last_updated | default(0) | int)
+        > (camera_pilot_telemetry_before.last_updated | int)
+      retries: 12
+      delay: 5
+      delegate_to: localhost
+      become: false
+      check_mode: false
+
+    - name: Prove workload preservation after camera log transition
+      ansible.builtin.assert:
+        that:
+          - camera_pilot_hashes_after.stdout == camera_pilot_hashes_before.stdout
+          - camera_pilot_sensor_service_after.stdout == 'active'
+          - camera_pilot_probes_after.stdout | int == 5
+          - camera_pilot_throttle_after.stdout | trim == 'throttled=0x0'

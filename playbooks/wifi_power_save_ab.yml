@@ -1,0 +1,95 @@
+---
+- name: Reversibly compare Wi-Fi power-save states on one reviewed nearby Pi
+  hosts: "{{ wifi_ab_target | default('agcmr1') }}"
+  gather_facts: false
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    ansible_become_exe: "/home/{{ ansible_user }}/.local/bin/sudo-rs-ansible-compat"
+    wifi_ab_confirm: false
+    wifi_ab_allowed_targets:
+      - agcmr1
+      - gmcep3
+    wifi_ab_interface: wlan0
+    wifi_ab_expected_probe_count:
+      agcmr1: 5
+      gmcep3: 5
+    wifi_ab_sensor_service:
+      agcmr1: mri-sensor.service
+      gmcep3: cv-sensor.service
+
+  tasks:
+    - name: Require explicit reviewed target and confirmation
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode or wifi_ab_confirm | bool
+          - inventory_hostname in wifi_ab_allowed_targets
+          - inventory_hostname == (wifi_ab_target | default('agcmr1'))
+        fail_msg: Run check mode first, then explicitly confirm the reviewed nearby target.
+
+    - name: Verify current link and application health
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        iw dev "{{ wifi_ab_interface }}" link | grep -q '^Connected to '
+        test "$(iw dev '{{ wifi_ab_interface }}' get power_save | awk '{print tolower($3)}')" = on
+        systemctl is-active --quiet "{{ wifi_ab_sensor_service[inventory_hostname] }}"
+        test "$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l)" \
+          -eq "{{ wifi_ab_expected_probe_count[inventory_hostname] }}"
+        test "$(vcgencmd get_throttled | sed 's/.*=//')" = 0x0
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Alternate live power-save state and sample gateway reachability
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        interface="{{ wifi_ab_interface }}"
+        gateway="$(ip route show default dev "$interface" | awk 'NR == 1 {print $3}')"
+        test -n "$gateway"
+        original="$(iw dev "$interface" get power_save | awk '{print tolower($3)}')"
+        test "$original" = on -o "$original" = off
+        restore() { iw dev "$interface" set power_save "$original"; }
+        trap restore EXIT
+
+        sample() {
+          requested="$1"
+          iw dev "$interface" set power_save "$requested"
+          sleep 2
+          actual="$(iw dev "$interface" get power_save | awk '{print tolower($3)}')"
+          test "$actual" = "$requested"
+          signal="$(iw dev "$interface" link | awk '/signal:/ {print int($2); exit}')"
+          test -n "$signal"
+          printf 'sample state=%s signal_dbm=%s gateway=%s\n' "$actual" "$signal" "$gateway"
+          ping -q -n -c 30 -i 0.2 -W 1 "$gateway"
+        }
+
+        sample on
+        sample off
+        sample on
+        sample off
+      args:
+        executable: /bin/bash
+      register: wifi_ab_samples
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Prove original state and production health were restored
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        test "$(iw dev '{{ wifi_ab_interface }}' get power_save | awk '{print tolower($3)}')" = on
+        iw dev "{{ wifi_ab_interface }}" link | grep -q '^Connected to '
+        systemctl is-active --quiet "{{ wifi_ab_sensor_service[inventory_hostname] }}"
+        test "$(find /sys/bus/w1/devices -maxdepth 1 -type l -name '28-*' | wc -l)" \
+          -eq "{{ wifi_ab_expected_probe_count[inventory_hostname] }}"
+        test "$(vcgencmd get_throttled | sed 's/.*=//')" = 0x0
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+
+    - name: Show A/B evidence
+      ansible.builtin.debug:
+        var: wifi_ab_samples.stdout_lines
+      when: not ansible_check_mode

@@ -1,0 +1,47 @@
+- name: Install fixed-path Pi backup export helper
+  ansible.builtin.copy:
+    src: pi-backup-export
+    dest: /usr/local/sbin/pi-backup-export
+    owner: root
+    group: root
+    mode: "0755"
+  register: backup_export_helper_change
+
+- name: Install narrow Pi backup export sudo rule
+  ansible.builtin.template:
+    src: pi-backup-export.sudoers.j2
+    dest: /etc/sudoers.d/pi-backup-export
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  register: backup_export_sudoers_change
+
+- name: Install forced-command dispatcher for the backup hub key
+  ansible.builtin.copy:
+    src: pi-backup-ssh-dispatch
+    dest: /usr/local/sbin/pi-backup-ssh-dispatch
+    owner: root
+    group: root
+    mode: "0755"
+  register: backup_export_dispatcher_change
+
+- name: Ensure the Pi account SSH directory is private
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.ssh"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0700"
+
+- name: Authorize only the hub pull key through the forced dispatcher
+  ansible.builtin.lineinfile:
+    path: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+    regexp: "mik-eq-pi-pull-backup$"
+    line: >-
+      from="100.95.120.88",command="/usr/local/sbin/pi-backup-ssh-dispatch",no-agent-forwarding,no-port-forwarding,no-pty,no-user-rc,no-X11-forwarding ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIECoZYGi8X2qDIdjXQ2Rx/u7b1RuSC2qv0IIL5FC9XQ0 mik-eq-pi-pull-backup
+    create: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+  register: backup_export_key_change
